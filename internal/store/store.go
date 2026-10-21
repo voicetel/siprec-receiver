@@ -351,6 +351,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 		{"disp_error_message", `ALTER TABLE calls ADD COLUMN disp_error_message TEXT NOT NULL DEFAULT ''`},
 		{"disp_notified_at", `ALTER TABLE calls ADD COLUMN disp_notified_at INTEGER NOT NULL DEFAULT 0`},
 		{"disp_raw", `ALTER TABLE calls ADD COLUMN disp_raw TEXT NOT NULL DEFAULT ''`},
+		{"disp_sequence", `ALTER TABLE calls ADD COLUMN disp_sequence INTEGER`},
+		{"disp_event_at", `ALTER TABLE calls ADD COLUMN disp_event_at INTEGER NOT NULL DEFAULT 0`},
 		{"voiceml_record_json", `ALTER TABLE calls ADD COLUMN voiceml_record_json TEXT NOT NULL DEFAULT ''`},
 		{"voiceml_fetched_at", `ALTER TABLE calls ADD COLUMN voiceml_fetched_at INTEGER NOT NULL DEFAULT 0`},
 	} {
@@ -1100,20 +1102,22 @@ func participantForLabel(rec *siprecsrv.Recording, label string) string {
 // VoiceML's StatusCallback payload (CallSid, CallStatus,
 // CallDuration, SipResponseCode, ErrorCode, …).
 type DispositionNotification struct {
-	CallSid      string
-	AccountSid   string
-	CallStatus   string
-	DurationSec  int
-	SipCode      int
-	ErrorCode    string
-	ErrorMessage string
-	AnsweredBy   string // terminal callbacks carry the AMD verdict too
-	From         string
-	To           string
-	Direction    string
-	SipCallID    string
-	FsUUID       string
-	Raw          string
+	SequenceNumber *int64 // nil when the sender does not supply ordering
+	Timestamp      time.Time
+	CallSid        string
+	AccountSid     string
+	CallStatus     string
+	DurationSec    int
+	SipCode        int
+	ErrorCode      string
+	ErrorMessage   string
+	AnsweredBy     string // terminal callbacks carry the AMD verdict too
+	From           string
+	To             string
+	Direction      string
+	SipCallID      string
+	FsUUID         string
+	Raw            string
 }
 
 // ApplyDisposition logs one final call outcome, with the same
@@ -1158,6 +1162,16 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 	}
 
 	if err == nil {
+		var priorStatus string
+		var priorSeq sql.NullInt64
+		var priorAt int64
+		if err := tx.QueryRowContext(ctx, `SELECT disp_status, disp_sequence, disp_event_at FROM calls WHERE id = ?`, id).
+			Scan(&priorStatus, &priorSeq, &priorAt); err != nil {
+			return 0, false, fmt.Errorf("store: disposition order lookup: %w", err)
+		}
+		if staleDisposition(priorStatus, priorSeq, priorAt, n) {
+			return id, true, nil // transaction rolls back without changing the final outcome
+		}
 		effCallSid := n.CallSid
 		if effCallSid != "" {
 			var ownerID int64
@@ -1172,6 +1186,8 @@ UPDATE calls SET
 	disp_status = ?, disp_duration_sec = ?, disp_sip_code = ?,
 	disp_error_code = ?, disp_error_message = ?, disp_raw = ?,
 	disp_notified_at = ?,
+	disp_sequence = COALESCE(?, disp_sequence),
+	disp_event_at = CASE WHEN ? > 0 THEN ? ELSE disp_event_at END,
 	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
 	amd_call_status = CASE WHEN amd_call_status = '' THEN ? ELSE amd_call_status END,
 	amd_notified_at = CASE WHEN amd_notified_at = 0 AND ? != '' THEN ? ELSE amd_notified_at END,
@@ -1186,7 +1202,8 @@ UPDATE calls SET
 	updated_at  = ?
 WHERE id = ?;`,
 			n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
-			n.Raw, millis(now), n.AnsweredBy, n.CallStatus, n.AnsweredBy,
+			n.Raw, millis(now), n.SequenceNumber, millis(n.Timestamp), millis(n.Timestamp),
+			n.AnsweredBy, n.CallStatus, n.AnsweredBy,
 			millis(now), nullIfEmpty(effCallSid), n.CallSid, nullIfEmpty(n.SipCallID),
 			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
 		if uerr != nil {
@@ -1210,12 +1227,12 @@ INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, disp_status, disp_duration_sec,
 	disp_sip_code, disp_error_code, disp_error_message, disp_notified_at,
 	disp_raw, amd_answered_by, amd_call_status, amd_notified_at,
-	created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		created_at, updated_at, disp_sequence, disp_event_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		nullIfEmpty(n.SipCallID), nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
 		n.From, n.To, n.Direction, millis(now), n.CallStatus, n.DurationSec,
 		n.SipCode, n.ErrorCode, n.ErrorMessage, millis(now), n.Raw,
-		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now))
+		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now), n.SequenceNumber, millis(n.Timestamp))
 	if ierr != nil {
 		return 0, false, fmt.Errorf("store: disposition insert: %w", ierr)
 	}

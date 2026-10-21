@@ -341,6 +341,7 @@ keys, upsert semantics, and response codes as the AMD endpoint, except
 | Field | Notes |
 |---|---|
 | `CallStatus` | **Required.** `completed`, `busy`, `no-answer`, `failed`, `canceled`, … (stored verbatim) |
+| `SequenceNumber` / `Timestamp` | Optional event order. Duplicate/older events are ignored; terminal results cannot be replaced by nonterminal events. Without comparable ordering, the first terminal result is retained |
 | `CallDuration` | Billable call seconds (kept separate from the recording's audio duration); `Duration` accepted |
 | `SipResponseCode` | Final SIP response code, when the poster knows it |
 | `ErrorCode` / `ErrorMessage` | Failure detail |

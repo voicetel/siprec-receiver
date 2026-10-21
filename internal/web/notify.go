@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/voicetel/siprec-receiver/internal/store"
 )
@@ -136,22 +137,29 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 
 	durationSec, _ := strconv.Atoi(firstNonEmpty(fields["CallDuration"], fields["Duration"]))
 	sipCode, _ := strconv.Atoi(fields["SipResponseCode"])
+	seq, eventTime, err := parseDispositionOrder(fields)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	n := store.DispositionNotification{
-		CallSid:      fields["CallSid"],
-		AccountSid:   fields["AccountSid"],
-		CallStatus:   fields["CallStatus"],
-		DurationSec:  durationSec,
-		SipCode:      sipCode,
-		ErrorCode:    fields["ErrorCode"],
-		ErrorMessage: fields["ErrorMessage"],
-		AnsweredBy:   fields["AnsweredBy"],
-		From:         firstNonEmpty(fields["From"], fields["Caller"]),
-		To:           firstNonEmpty(fields["To"], fields["Called"]),
-		Direction:    fields["Direction"],
-		SipCallID:    firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
-		FsUUID:       fields["FsUuid"],
-		Raw:          raw,
+		SequenceNumber: seq,
+		Timestamp:      eventTime,
+		CallSid:        fields["CallSid"],
+		AccountSid:     fields["AccountSid"],
+		CallStatus:     fields["CallStatus"],
+		DurationSec:    durationSec,
+		SipCode:        sipCode,
+		ErrorCode:      fields["ErrorCode"],
+		ErrorMessage:   fields["ErrorMessage"],
+		AnsweredBy:     fields["AnsweredBy"],
+		From:           firstNonEmpty(fields["From"], fields["Caller"]),
+		To:             firstNonEmpty(fields["To"], fields["Called"]),
+		Direction:      fields["Direction"],
+		SipCallID:      firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
+		FsUUID:         fields["FsUuid"],
+		Raw:            raw,
 	}
 
 	id, matched, err := s.Store.ApplyDisposition(r.Context(), n)
@@ -236,6 +244,7 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 				"fs_uuid": "FsUuid", "call_duration": "CallDuration",
 				"duration": "Duration", "sip_response_code": "SipResponseCode",
 				"error_code": "ErrorCode", "error_message": "ErrorMessage",
+				"sequence_number": "SequenceNumber", "timestamp": "Timestamp",
 			}
 			for k, canon := range alias {
 				if v, ok := fields[k]; ok && fields[canon] == "" {
@@ -268,6 +277,26 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 	}
 
 	return fields, string(body)
+}
+
+func parseDispositionOrder(fields map[string]string) (*int64, time.Time, error) {
+	var seq *int64
+	if value := fields["SequenceNumber"]; value != "" {
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || n < 0 {
+			return nil, time.Time{}, errors.New("invalid SequenceNumber")
+		}
+		seq = &n
+	}
+	if value := fields["Timestamp"]; value != "" {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC1123Z, time.RFC1123} {
+			if at, err := time.Parse(layout, value); err == nil {
+				return seq, at, nil
+			}
+		}
+		return nil, time.Time{}, errors.New("invalid Timestamp")
+	}
+	return seq, time.Time{}, nil
 }
 
 func firstNonEmpty(vs ...string) string {

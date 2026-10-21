@@ -1008,6 +1008,16 @@ components:
       required:
         - CallStatus
       properties:
+        SequenceNumber:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Optional call event sequence; duplicate and older events are ignored.
+          example: 3
+        Timestamp:
+          type: string
+          description: Optional event time (RFC 3339 or RFC 1123); used when sequence numbers cannot be compared.
+          example: '2026-10-21T12:00:00Z'
         CallSid:
           $ref: '#/components/schemas/CallSidField'
         AccountSid:
