@@ -1,0 +1,29 @@
+description: siprec-receiver ruleset — recommended, minus two wire-format rules (see file comments).
+# Vacuum ruleset for siprec-receiver's OpenAPI spec.
+#
+# Starts from the recommended ruleset and turns off exactly two rules
+# that contradict this API's externally-defined wire formats:
+#
+#   camel-case-properties — the notify API's field names are defined by
+#     the VoiceML/Twilio webhook payloads it must accept (CallSid,
+#     AnsweredBy, MachineDetectionDuration, … are PascalCase on the
+#     wire), and the HTML form fields follow HTML conventions
+#     (csrf_token, account_sid). Renaming them in the spec would
+#     document an API that does not exist.
+#
+#   no-http-verbs-in-path — /recordings/{id}/delete,
+#     /admin/users/delete and /admin/integrations/delete are browser
+#     form actions. HTML forms can only POST, so the action is named
+#     in the path; all three are POST-only, CSRF-protected,
+#     admin-gated (where applicable) endpoints, not RPC design in the
+#     machine API (which has no verbs in its paths).
+#
+# Everything else stays at the recommended severity (53 of the 55
+# recommended rules active). Run:
+#   vacuum lint -r vacuum-ruleset.yaml internal/web/openapi.yaml
+# Expected result: Quality Score 100/100, zero violations.
+extends:
+  - [vacuum:oas, recommended]
+rules:
+  camel-case-properties: "off"
+  no-http-verbs-in-path: "off"

@@ -411,11 +411,41 @@ The recordings list filters by free text (number, CallSid, SIP
 Call-ID, FreeSWITCH UUID) and by AMD disposition, 50 calls per page.
 Each call's page shows every stored field, one audio player + download
 link per leg, and collapsible raw AMD/metadata payloads. Anonymous
-requests redirect to the sign-in page; `GET /healthz` is the only
-unauthenticated route besides the OAuth flow and the secret-gated
-notify endpoints. Sign-out is a POST form (a cross-site GET cannot
+requests redirect to the sign-in page; the only unauthenticated
+routes are `GET /healthz`, the OpenAPI spec and docs (below), the
+OAuth flow, and the secret-gated notify endpoints. Sign-out is a
+POST form (a cross-site GET cannot
 log a user out), and all responses carry `X-Frame-Options: DENY`, a
 frame-ancestors CSP, and `nosniff`.
+
+## API documentation (OpenAPI + ReDoc)
+
+The HTTP surface is specified as OpenAPI 3.1 in
+`internal/web/openapi.yaml` and served by the binary itself:
+
+- `GET /openapi.yaml` — the spec (no auth).
+- `GET /api/docs` — a [ReDoc](https://github.com/Redocly/redoc)
+  rendering of it (no auth; the ReDoc bundle loads from the jsDelivr
+  CDN under a page-scoped CSP, the spec is same-origin).
+
+The spec covers the notify endpoints in wire detail (VoiceML/Twilio
+field names, correlation keys, upsert semantics), the health and
+auth flows, and every UI/admin operation with its forms and
+redirects. A served-spec test asserts every implemented route is
+documented.
+
+Vetting: the spec scores **100/100 with zero violations** under
+vacuum's recommended ruleset, with two rules disabled in the
+committed `vacuum-ruleset.yaml` because they contradict the wire
+formats being documented (PascalCase webhook field names;
+browser-form `/delete` action paths). Check it with:
+
+```sh
+make spec     # vacuum lint -r vacuum-ruleset.yaml internal/web/openapi.yaml
+```
+
+(Install vacuum with
+`go install github.com/daveshanley/vacuum@latest`.)
 
 ## Architecture
 

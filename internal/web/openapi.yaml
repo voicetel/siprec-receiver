@@ -1,0 +1,1028 @@
+openapi: 3.1.0
+info:
+  title: siprec-receiver API
+  version: 0.2.0
+  summary: SIPREC recording server — notification API and web UI
+  description: |
+    siprec-receiver is a SIPREC Session Recording Server (SRS). FreeSWITCH
+    (via mod_siprec) or any RFC 7866 SRC sends it recordings; this HTTP API
+    is how call outcomes reach those recordings and how people review them.
+
+    Two audiences share one listener:
+
+    * **Machines** — `POST /api/notify/amd` and `POST /api/notify/disposition`
+      log the AMD (answering-machine detection) verdict and the final call
+      outcome for a call, authenticated with a shared secret. Field names are
+      the ones VoiceML posts to an AsyncAmdStatusCallback / StatusCallback
+      URL, so existing webhook senders work unmodified.
+    * **People** — the web UI under `/recordings` and `/admin`, authenticated
+      with Google OAuth and an allowlist (see the `SessionCookie` scheme).
+
+    The SIP/SIPREC listener itself (RFC 7866) is not an HTTP API and is not
+    described here; see the project README for its wire behavior.
+  contact:
+    name: VoiceTel Communications
+    url: https://www.voicetel.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: /
+    description: The siprec-receiver instance serving this spec (relative to its public base URL).
+tags:
+  - name: Notify
+    description: Machine-to-machine call notification endpoints (shared-secret auth).
+  - name: System
+    description: Health and documentation endpoints (no auth).
+  - name: Web UI
+    description: Browser UI for reviewing recordings (Google OAuth session).
+  - name: Admin
+    description: Administrator-only UI — user, integration, and audit management (Google OAuth session, admin role).
+paths:
+  /healthz:
+    get:
+      tags:
+        - System
+      operationId: getHealthz
+      summary: Liveness probe
+      description: Returns 200 with a plain-text body while the process is serving HTTP. No authentication.
+      responses:
+        '200':
+          description: The service is up.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "ok\n"
+  /openapi.yaml:
+    get:
+      tags:
+        - System
+      operationId: getOpenAPISpec
+      summary: This OpenAPI document
+      description: Serves the OpenAPI 3.1 specification you are reading, as YAML. No authentication.
+      responses:
+        '200':
+          description: The OpenAPI document.
+          content:
+            application/yaml:
+              schema:
+                type: string
+  /api/docs:
+    get:
+      tags:
+        - System
+      operationId: getApiDocs
+      summary: ReDoc rendering of the spec
+      description: Serves a ReDoc page rendering `/openapi.yaml` for human readers. No authentication.
+      responses:
+        '200':
+          description: The ReDoc HTML page.
+          content:
+            text/html:
+              schema:
+                type: string
+  /api/notify/amd:
+    post:
+      tags:
+        - Notify
+      operationId: postNotifyAMD
+      summary: Log an AMD disposition for a call
+      description: |
+        Logs the answering-machine detection verdict for a call and attaches
+        it to the call's recording record. Accepts the exact field names
+        VoiceML posts to an AsyncAmdStatusCallback URL, form-encoded or JSON.
+
+        Correlation: the notification must carry at least one of `CallSid`
+        (matched against recordings stamped with `vm-callsid` on the SRS
+        URI), `SipCallId` (the SIPREC dialog's SIP Call-ID), or `FsUuid`
+        (the FreeSWITCH parent call UUID). Notifications are upserts: one
+        arriving before its recording creates an AMD-only row that the
+        recording later adopts.
+
+        Authentication is the `NOTIFY_SECRET` shared secret, presented as
+        `Authorization: Bearer <secret>` (preferred), the `X-Notify-Secret`
+        header, or the `secret` query parameter (for webhook senders that
+        cannot set headers; URLs are logged, so prefer the header). When no
+        secret is configured the endpoint answers 503 rather than run open.
+      security:
+        - NotifySecret: []
+      requestBody:
+        required: true
+        description: AMD fields, form-encoded (webhook shape) or JSON.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/AMDNotifyRequest'
+            example:
+              CallSid: CA0123456789abcdef0123456789abcdef
+              AccountSid: AC0123456789abcdef0123456789abcdef
+              AnsweredBy: machine_end_beep
+              MachineDetectionDuration: 3100
+              From: '+12125550100'
+              To: '+12125550101'
+              CallStatus: completed
+              SipCallId: 0a1b2c3d@fs.example.com
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AMDNotifyRequest'
+            example:
+              CallSid: CA0123456789abcdef0123456789abcdef
+              AnsweredBy: human
+              MachineDetectionDuration: 1250
+              FsUuid: 123e4567-e89b-12d3-a456-426614174000
+      responses:
+        '200':
+          description: AMD disposition logged. `matched` reports whether a recording row already existed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotifyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotifyDisabled'
+  /api/notify/disposition:
+    post:
+      tags:
+        - Notify
+      operationId: postNotifyDisposition
+      summary: Log the final call disposition
+      description: |
+        Logs what ultimately happened to a call — the content of the terminal
+        StatusCallback. Same authentication, body shapes, correlation keys,
+        and upsert semantics as `POST /api/notify/amd`; `CallStatus` is
+        required instead of `AnsweredBy`. A disposition that carries
+        `AnsweredBy` also fills the AMD fields when they are still empty.
+        The billable `CallDuration` is stored separately from the recording's
+        audio duration.
+      security:
+        - NotifySecret: []
+      requestBody:
+        required: true
+        description: Final-outcome fields, form-encoded (webhook shape) or JSON.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/DispositionNotifyRequest'
+            example:
+              CallSid: CA0123456789abcdef0123456789abcdef
+              CallStatus: completed
+              CallDuration: 62
+              SipResponseCode: 200
+              AnsweredBy: machine_end_beep
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispositionNotifyRequest'
+            example:
+              CallSid: CA0123456789abcdef0123456789abcdef
+              CallStatus: busy
+              SipResponseCode: 486
+      responses:
+        '200':
+          description: Disposition logged. `matched` reports whether a recording row already existed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotifyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotifyDisabled'
+  /login:
+    get:
+      tags:
+        - Web UI
+      operationId: getLoginPage
+      summary: Sign-in page
+      description: Renders the Google sign-in page. No authentication.
+      responses:
+        '200':
+          description: The sign-in HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+  /auth/login:
+    get:
+      tags:
+        - Web UI
+      operationId: getAuthLogin
+      summary: Start Google sign-in
+      description: |
+        Redirects to Google's OAuth consent flow (with PKCE), or — when the
+        dev bypass is configured — signs in directly as the dev address.
+        No authentication.
+      responses:
+        '303':
+          description: Redirect to Google (or to `/recordings` under the dev bypass).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '503':
+          description: Google OAuth is not configured and no dev bypass is set.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+  /auth/callback:
+    get:
+      tags:
+        - Web UI
+      operationId: getAuthCallback
+      summary: Google OAuth callback
+      description: |
+        Completes sign-in: verifies the PKCE-backed code exchange and the
+        ID token, then checks the allowlist (bootstrap `ADMIN_EMAIL` or a
+        user row), the pinned Google account ID, and the optional Workspace
+        domain. On success it sets the session cookie and redirects to
+        `/recordings`. No authentication (it *is* the authentication).
+      parameters:
+        - name: code
+          in: query
+          required: true
+          description: The OAuth authorization code from Google.
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          description: The CSRF state token issued by `/auth/login`; must match the state cookie.
+          schema:
+            type: string
+      responses:
+        '303':
+          description: Signed in; redirect to `/recordings` with the session cookie set.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '400':
+          description: Missing code or invalid state.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+        '401':
+          description: The ID token did not validate.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+        '403':
+          description: Unverified email, wrong Workspace domain, or the account is not authorized.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+        '502':
+          description: The code exchange with Google failed or returned no ID token.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+        '503':
+          description: Google OAuth is not configured.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+  /auth/logout:
+    post:
+      tags:
+        - Web UI
+      operationId: postAuthLogout
+      summary: Sign out
+      description: Clears the session cookie and redirects to `/login`. POST-only, so a cross-site GET cannot sign a user out.
+      security:
+        - SessionCookie: []
+      responses:
+        '303':
+          description: Signed out; redirect to `/login`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+  /:
+    get:
+      tags:
+        - Web UI
+      operationId: getRoot
+      summary: Root redirect
+      description: Redirects signed-in users to the recordings list.
+      security:
+        - SessionCookie: []
+      responses:
+        '303':
+          description: Redirect to `/recordings`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+  /recordings:
+    get:
+      tags:
+        - Web UI
+      operationId: getRecordings
+      summary: List calls and recordings
+      description: |
+        The recordings list: every call (recorded, AMD/disposition-only, or
+        merged), newest first, 50 per page. Filter by free text (number,
+        CallSid, SIP Call-ID, FreeSWITCH UUID) and by AMD disposition.
+      security:
+        - SessionCookie: []
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Free-text filter — substring of a number, CallSid, SIP Call-ID, or FreeSWITCH UUID. LIKE wildcards match literally.
+          schema:
+            type: string
+          example: '12125550100'
+        - name: amd
+          in: query
+          required: false
+          description: Filter to one AMD disposition.
+          schema:
+            $ref: '#/components/schemas/AnsweredBy'
+        - name: page
+          in: query
+          required: false
+          description: Page number (50 calls per page), starting at 1.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: msg
+          in: query
+          required: false
+          description: Flash message shown at the top of the page (set by form-post redirects).
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The recordings list HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '303':
+          description: Not signed in; redirect to `/login`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /recordings/{id}:
+    get:
+      tags:
+        - Web UI
+      operationId: getRecording
+      summary: One call's detail page
+      description: |
+        Every stored field for one call: identities and correlation keys,
+        AMD and final disposition, per-leg audio players with download
+        links, the fetched VoiceML record (when present), and the raw
+        notification/metadata payloads. Administrators also get the
+        delete form.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      responses:
+        '200':
+          description: The call detail HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '303':
+          description: Not signed in; redirect to `/login` instead of the call page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /recordings/{id}/legs/{legID}/audio:
+    get:
+      tags:
+        - Web UI
+      operationId: getLegAudio
+      summary: Stream or download one leg's WAV
+      description: |
+        Serves one recorded leg's WAV (`audio/wav`) with HTTP Range
+        support for in-browser seeking. The stored path is confined to
+        the recording directory; paths outside it answer 404.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+        - name: legID
+          in: path
+          required: true
+          description: The leg (audio stream) ID within the call.
+          schema:
+            type: integer
+            format: int64
+        - name: download
+          in: query
+          required: false
+          description: When `1`, serve as an attachment download instead of inline playback.
+          schema:
+            type: string
+            enum:
+              - '1'
+      responses:
+        '200':
+          description: The WAV audio.
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '206':
+          description: A byte-range slice of the WAV (for seeking).
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+        '303':
+          description: Not signed in; redirect to `/login` instead of audio.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /recordings/{id}/fetch-record:
+    post:
+      tags:
+        - Web UI
+      operationId: postFetchRecord
+      summary: Fetch the full call record from VoiceML
+      description: |
+        On-request enrichment: GETs the call's full VoiceML Call record
+        using the per-account API key an administrator stored under
+        Integrations, saves the JSON onto the call, and fills still-empty
+        identity/disposition fields from it. Any signed-in user may
+        refresh; nothing is fetched automatically. Failures come back as
+        a flash message on the call page.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      requestBody:
+        required: true
+        description: CSRF form for the fetch action.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CSRFForm'
+      responses:
+        '303':
+          description: Redirect back to the call page with a flash message (success or the reason it failed).
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          description: Invalid CSRF token.
+          content:
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ErrorText'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /recordings/{id}/delete:
+    post:
+      tags:
+        - Admin
+      operationId: postDeleteRecording
+      summary: Delete a recording (admin)
+      description: Permanently deletes the call's database rows and its WAV files, and writes an audit-log entry. Administrators only.
+      security:
+        - SessionCookie: []
+      parameters:
+        - $ref: '#/components/parameters/CallId'
+      requestBody:
+        required: true
+        description: CSRF form for the delete action.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CSRFForm'
+      responses:
+        '303':
+          description: Deleted; redirect to the recordings list.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /admin/users:
+    get:
+      tags:
+        - Admin
+      operationId: getAdminUsers
+      summary: User management page (admin)
+      description: Lists the bootstrap administrator (from ADMIN_EMAIL, read-only) and every allowlisted user, with add/remove/revoke forms. Administrators only.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: The user management HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Admin
+      operationId: postAdminUserUpsert
+      summary: Add a user or change a role (admin)
+      description: Adds an allowlisted user (or updates an existing user's role). The new user signs in with Google; their Google account ID is pinned at first sign-in. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The add-user form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserUpsertForm'
+            example:
+              email: viewer@example.com
+              role: user
+              csrf_token: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+      responses:
+        '303':
+          description: Saved; redirect back to the users page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/users/delete:
+    post:
+      tags:
+        - Admin
+      operationId: postAdminUserDelete
+      summary: Remove a user (admin)
+      description: Removes an allowlist entry; the account loses access on its next request. The bootstrap administrator (ADMIN_EMAIL) cannot be removed. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The remove-user form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmailForm'
+      responses:
+        '303':
+          description: Removed; redirect back to the users page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/users/revoke:
+    post:
+      tags:
+        - Admin
+      operationId: postAdminUserRevoke
+      summary: Revoke a user's sessions (admin)
+      description: Bumps the user's session epoch, signing them out on every device at their next request. The user can sign in again immediately. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The revoke-sessions form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/EmailForm'
+      responses:
+        '303':
+          description: Revoked; redirect back to the users page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/audit:
+    get:
+      tags:
+        - Admin
+      operationId: getAdminAudit
+      summary: Audit log page (admin)
+      description: The newest 200 administrative actions (recording deletions, user and key management, session revocations, record fetches) with actor, action, target, and time. Administrators only.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: The audit log HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/integrations:
+    get:
+      tags:
+        - Admin
+      operationId: getAdminIntegrations
+      summary: VoiceML integration keys page (admin)
+      description: Lists the VoiceML accounts with a stored API key (keys are never rendered back) and the add/replace form. Administrators only.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: The integrations HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Admin
+      operationId: postAdminIntegrationUpsert
+      summary: Store a VoiceML API key (admin)
+      description: Adds or replaces the per-account VoiceML API key used by on-request record fetches. The key is write-only and is used solely as the fetch's Basic-auth password. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The add-key form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/IntegrationUpsertForm'
+      responses:
+        '303':
+          description: Saved; redirect back to the integrations page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/integrations/delete:
+    post:
+      tags:
+        - Admin
+      operationId: postAdminIntegrationDelete
+      summary: Remove a VoiceML API key (admin)
+      description: Removes one account's stored API key; record fetches for that account stop working until a new key is saved. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The remove-key form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/IntegrationDeleteForm'
+      responses:
+        '303':
+          description: Removed; redirect back to the integrations page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+components:
+  securitySchemes:
+    NotifySecret:
+      type: http
+      scheme: bearer
+      description: |
+        The shared `NOTIFY_SECRET`. Presented as `Authorization: Bearer
+        <secret>` (this scheme), or as the `X-Notify-Secret` header, or as
+        the `secret` query parameter for webhook senders that cannot set
+        headers. When no secret is configured the endpoints answer 503.
+    SessionCookie:
+      type: apiKey
+      in: cookie
+      name: sr_session
+      description: |
+        The signed session cookie minted by Google sign-in. Named
+        `sr_session`, or `__Host-sr_session` when the public base URL is
+        HTTPS. Carries the email, pinned Google account ID, session epoch,
+        and expiry — all re-validated against the allowlist on every request.
+  headers:
+    Location:
+      description: Redirect target.
+      schema:
+        type: string
+        format: uri-reference
+  parameters:
+    CallId:
+      name: id
+      in: path
+      required: true
+      description: The call row's numeric ID (from the recordings list URLs).
+      schema:
+        type: integer
+        format: int64
+  responses:
+    BadRequest:
+      description: Malformed body, a missing required field, or no correlation key (CallSid, SipCallId, or FsUuid).
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    Unauthorized:
+      description: Missing or wrong notify secret.
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    Forbidden:
+      description: Signed in without the required role, or an invalid CSRF token.
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    NotFound:
+      description: No such call or leg (or the audio path escapes the recording directory).
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    InternalError:
+      description: The store rejected the write; the disposition was not logged.
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    NotifyDisabled:
+      description: NOTIFY_SECRET is not configured; the notify endpoints disable themselves rather than run open.
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+  schemas:
+
+    CallSidField:
+      type: string
+      description: The call's CallSid (CA…) — correlates with recordings stamped `vm-callsid` on the SRS URI.
+      example: CA0123456789abcdef0123456789abcdef
+    AccountSidField:
+      type: string
+      description: The owning account's SID (AC…).
+      example: AC0123456789abcdef0123456789abcdef
+    FromField:
+      type: string
+      description: Caller number, E.164.
+      example: '+12125550100'
+    ToField:
+      type: string
+      description: Called number, E.164.
+      example: '+12125550101'
+    CallerField:
+      type: string
+      description: Synonym of From, sent by VoiceML/Twilio-shaped webhooks.
+      example: '+12125550100'
+    CalledField:
+      type: string
+      description: Synonym of To, sent by VoiceML/Twilio-shaped webhooks.
+      example: '+12125550101'
+    DirectionField:
+      type: string
+      description: Call direction (outbound-api, inbound, …).
+      example: outbound-api
+    SipCallIdField:
+      type: string
+      description: The SIPREC recording dialog's SIP Call-ID — direct correlation key.
+      example: 0a1b2c3d@fs.example.com
+    FsUuidField:
+      type: string
+      description: The FreeSWITCH parent call UUID — matches the RS-Metadata session_id.
+      format: uuid
+      example: 123e4567-e89b-12d3-a456-426614174000
+    CSRFTokenField:
+      type: string
+      description: The session's CSRF token (rendered into every authenticated page; bound to the session expiry).
+      example: 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    ErrorText:
+      type: string
+      description: Plain-text error message (Go `http.Error` body).
+      example: AnsweredBy is required
+    HTMLPage:
+      type: string
+      description: A rendered HTML page.
+      format: html
+    AnsweredBy:
+      type: string
+      description: |
+        AMD verdict vocabulary. The strict set is what VoiceML emits on the
+        wire; the extended values (`screened`, `screened_ivr`,
+        `disconnected`) are accepted and stored verbatim.
+      enum:
+        - human
+        - machine_start
+        - machine_end_beep
+        - machine_end_silence
+        - machine_end_other
+        - fax
+        - unknown
+        - screened
+        - screened_ivr
+        - disconnected
+      example: machine_end_beep
+    AMDNotifyRequest:
+      type: object
+      description: |
+        AMD notification fields (form-encoded webhook shape or JSON).
+        At least one correlation key (CallSid, SipCallId, FsUuid) is
+        required alongside AnsweredBy, or the request is a 400.
+      required:
+        - AnsweredBy
+      properties:
+        CallSid:
+          $ref: '#/components/schemas/CallSidField'
+        AccountSid:
+          $ref: '#/components/schemas/AccountSidField'
+        AnsweredBy:
+          $ref: '#/components/schemas/AnsweredBy'
+        MachineDetectionDuration:
+          type: integer
+          description: Milliseconds until the AMD verdict.
+          minimum: 0
+          example: 3100
+        From:
+          $ref: '#/components/schemas/FromField'
+        To:
+          $ref: '#/components/schemas/ToField'
+        Caller:
+          $ref: '#/components/schemas/CallerField'
+        Called:
+          $ref: '#/components/schemas/CalledField'
+        CallStatus:
+          type: string
+          description: The call's status at verdict time.
+          example: in-progress
+        Direction:
+          $ref: '#/components/schemas/DirectionField'
+        ApiVersion:
+          type: string
+          description: The webhook API version, stored with the raw payload.
+          example: '2010-04-01'
+        SipCallId:
+          $ref: '#/components/schemas/SipCallIdField'
+        FsUuid:
+          $ref: '#/components/schemas/FsUuidField'
+    DispositionNotifyRequest:
+      type: object
+      description: |
+        Final call-outcome fields (the terminal StatusCallback's content).
+        At least one correlation key (CallSid, SipCallId, FsUuid) is
+        required alongside CallStatus, or the request is a 400.
+      required:
+        - CallStatus
+      properties:
+        CallSid:
+          $ref: '#/components/schemas/CallSidField'
+        AccountSid:
+          $ref: '#/components/schemas/AccountSidField'
+        CallStatus:
+          type: string
+          description: Final call status, stored verbatim (completed, busy, no-answer, failed, canceled, …).
+          example: completed
+        CallDuration:
+          type: integer
+          description: Billable call duration in seconds; stored separately from the recording's audio duration.
+          minimum: 0
+          example: 62
+        Duration:
+          type: integer
+          description: Accepted synonym of CallDuration.
+          minimum: 0
+          example: 62
+        SipResponseCode:
+          type: integer
+          description: The final SIP response code, when the poster knows it.
+          example: 200
+        ErrorCode:
+          type: string
+          description: Platform error code for failed calls.
+          example: '13224'
+        ErrorMessage:
+          type: string
+          description: Human-readable failure detail.
+          example: 'The called party is busy'
+        AnsweredBy:
+          $ref: '#/components/schemas/AnsweredBy'
+        From:
+          $ref: '#/components/schemas/FromField'
+        To:
+          $ref: '#/components/schemas/ToField'
+        Caller:
+          $ref: '#/components/schemas/CallerField'
+        Called:
+          $ref: '#/components/schemas/CalledField'
+        Direction:
+          $ref: '#/components/schemas/DirectionField'
+        SipCallId:
+          $ref: '#/components/schemas/SipCallIdField'
+        FsUuid:
+          $ref: '#/components/schemas/FsUuidField'
+    NotifyResponse:
+      type: object
+      description: Result of a logged notification.
+      required:
+        - id
+        - matched
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: The call row's ID (usable in `/recordings/{id}`).
+          example: 42
+        matched:
+          type: boolean
+          description: True when an existing recording/notification row was updated; false when a new AMD/disposition-only row was created.
+          example: true
+    CSRFForm:
+      type: object
+      description: A form carrying only the per-session CSRF token.
+      required:
+        - csrf_token
+      properties:
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
+    UserUpsertForm:
+      type: object
+      description: The add-user / change-role form.
+      required:
+        - email
+        - role
+        - csrf_token
+      properties:
+        email:
+          type: string
+          format: email
+          description: The user's Google account email (normalized to lowercase).
+          example: viewer@example.com
+        role:
+          type: string
+          description: The user's role.
+          enum:
+            - user
+            - admin
+          example: user
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
+    EmailForm:
+      type: object
+      description: A form identifying one user by email.
+      required:
+        - email
+        - csrf_token
+      properties:
+        email:
+          type: string
+          format: email
+          description: The target user's email.
+          example: viewer@example.com
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
+    IntegrationUpsertForm:
+      type: object
+      description: The store-VoiceML-key form. Keys are write-only and never rendered back.
+      required:
+        - account_sid
+        - api_key
+        - csrf_token
+      properties:
+        account_sid:
+          $ref: '#/components/schemas/AccountSidField'
+        api_key:
+          type: string
+          format: password
+          description: That account's VoiceML API key (used only as the record fetch's Basic-auth password).
+          example: 0123456789abcdef0123456789abcdef
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
+    IntegrationDeleteForm:
+      type: object
+      description: The remove-VoiceML-key form.
+      required:
+        - account_sid
+        - csrf_token
+      properties:
+        account_sid:
+          $ref: '#/components/schemas/AccountSidField'
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'

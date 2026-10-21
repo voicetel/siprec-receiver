@@ -39,6 +39,25 @@ type Server struct {
 //go:embed templates/*.html
 var templatesFS embed.FS
 
+//go:embed openapi.yaml
+var openAPISpec []byte
+
+// redocPage renders the spec with ReDoc. The ReDoc bundle loads from
+// the jsDelivr CDN; the spec itself is same-origin.
+const redocPage = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>siprec-receiver API</title>
+</head>
+<body>
+<redoc spec-url="/openapi.yaml"></redoc>
+<script src="https://cdn.jsdelivr.net/npm/redoc@2/bundles/redoc.standalone.js"></script>
+</body>
+</html>
+`
+
 // amdDispositions is the filter vocabulary for the recordings list —
 // VoiceML's internal AMD verdict set (Twilio's strict wire set
 // plus the extended screened/disconnected values).
@@ -89,6 +108,23 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		_, _ = w.Write([]byte("ok\n"))
+	})
+
+	mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		_, _ = w.Write(openAPISpec)
+	})
+	mux.HandleFunc("GET /api/docs", func(w http.ResponseWriter, r *http.Request) {
+		// The global CSP forbids CDN scripts; this one public page
+		// gets a scoped policy that allows exactly the ReDoc bundle.
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; "+
+				"style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "+
+				"img-src 'self' data: https://cdn.jsdelivr.net; worker-src 'self' blob:; "+
+				"font-src 'self' data: https://cdn.jsdelivr.net; frame-ancestors 'none'")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(redocPage))
 	})
 
 	mux.HandleFunc("POST /api/notify/amd", s.handleNotifyAMD)
