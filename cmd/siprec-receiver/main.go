@@ -51,6 +51,7 @@ type config struct {
 	AdminEmail    string
 	NotifySecret  string
 	DevAuthEmail  string
+	RetentionDays int
 }
 
 func envOr(key, def string) string {
@@ -104,6 +105,7 @@ func loadConfig() config {
 		AdminEmail:    os.Getenv("ADMIN_EMAIL"),
 		NotifySecret:  os.Getenv("NOTIFY_SECRET"),
 		DevAuthEmail:  os.Getenv("DEV_AUTH_EMAIL"),
+		RetentionDays: envInt("RETENTION_DAYS", 0),
 	}
 }
 
@@ -141,6 +143,20 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Adopt WAVs a previous crash/kill left unfinalized (their SIPREC
+	// sessions never sent BYE), then start the retention sweep. Both
+	// run before the listeners come up so the UI never shows a state
+	// the sweep is about to change underneath it.
+	if n, err := st.RecoverOrphans(ctx, cfg.RecordingDir); err != nil {
+		log.Printf("[main] orphan recovery: %v", err)
+	} else if n > 0 {
+		log.Printf("[main] orphan recovery: adopted %d recording(s) from %s", n, cfg.RecordingDir)
+	}
+
+	if cfg.RetentionDays > 0 {
+		go retentionLoop(ctx, st, cfg.RetentionDays)
+	}
 
 	pool := rtp.NewPortPool(cfg.RTPPortMin, cfg.RTPPortMax)
 	finalizer := store.Finalizer{S: st}
@@ -228,6 +244,47 @@ func main() {
 	defer shutdownCancel()
 
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+// retentionLoop deletes calls (rows + WAV files) that started more
+// than days ago: once at startup, then daily. Disabled when days <= 0
+// (main only starts it then).
+func retentionLoop(ctx context.Context, st *store.Store, days int) {
+	sweep := func() {
+		cutoff := time.Now().AddDate(0, 0, -days)
+
+		paths, n, err := st.DeleteCallsStartedBefore(ctx, cutoff)
+		if err != nil {
+			log.Printf("[retention] sweep: %v", err)
+
+			return
+		}
+
+		for _, p := range paths {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				log.Printf("[retention] remove %s: %v", p, err)
+			}
+		}
+
+		if n > 0 {
+			log.Printf("[retention] deleted %d call(s) started before %s (%d file(s))",
+				n, cutoff.Format("2006-01-02"), len(paths))
+		}
+	}
+
+	sweep()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }
 
 func ephemeralSecret() string {

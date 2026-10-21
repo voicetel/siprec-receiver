@@ -125,6 +125,7 @@ All configuration is environment variables (see also `.env.example`).
 | `SESSION_SECRET` | ephemeral | HMAC secret for session cookies; set a stable random value in production or every restart signs everyone out |
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
+| `RETENTION_DAYS` | `0` (disabled) | Delete calls (rows + WAV files) that started more than this many days ago; swept at startup, then daily |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
 
 Put the HTTP listener behind a TLS-terminating reverse proxy in
@@ -201,12 +202,29 @@ parameters, e.g. mod_siprec's per-call ad-hoc form:
   where `<label>` is the sending participant's number from RS-Metadata
   when resolvable (`…-12165285911.wav`), else the SDP label, else
   `leg<N>`. WAV files are written `0600`.
+- **Pause semantics:** while a recording is paused the SRC forks no
+  RTP, so paused wall-clock time is *compressed out* of the WAV — the
+  file (and `duration_sec`, which counts recorded samples) contains
+  only the audio that was actually sent. A 4 s + 3 s-pause + 4 s call
+  yields an ≈8 s recording, not 11 s.
+- **Write failures are loud, never silent:** the first WAV write error
+  on a leg (the classic case is a full disk) is logged immediately as
+  `WAV WRITE FAILED`, stored on the leg, and shown in the UI (a
+  ⚠ badge in the list, the error text on the call page). The audio
+  after the failure point is lost, but the record says so.
 - **Ports:** one even UDP port per stream from the `RTP_PORT_MIN`–
   `RTP_PORT_MAX` pool, released on BYE. Pool exhaustion answers 500 and
   records nothing.
 - **Dialog end:** BYE closes the WAVs and finalizes the call within a
   second; a dialog that never sends BYE keeps its files open (watch for
   SRC crashes stranding ports — the pool size bounds concurrent calls).
+- **Crash recovery:** if the SRS itself dies mid-recording, the WAVs
+  on disk are adopted at the next startup: their headers are repaired
+  in place (a crashed file still carries the writer's placeholder
+  sizes), durations are recomputed from the audio present, and each
+  becomes a normal `completed` call marked `recovered-orphan` in the
+  direction field, started at the file's modification time. Files that
+  are not playable WAVs are logged and left alone.
 
 ## AMD call notifications
 
@@ -369,11 +387,31 @@ What the tests prove (no FreeSWITCH needed):
   and audio); audio paths outside `RECORDING_DIR` are refused; session
   tampering and CSRF failures are rejected.
 
+### Live interop test (real FreeSWITCH + mod_siprec)
+
+`tests/interop/run.sh` places real sofia calls through FreeSWITCH with
+`mod_siprec` recording to a freshly built siprec-receiver, then asserts
+on the resulting DB rows and WAV files: the mixed pause/resume call
+(≈8 s of tone, pause compressed out), the mid-call `siprec_stop` call
+(≈2 s), separate-streams (two legs, 440 Hz vs 1000 Hz dominant), the
+decoded FreeSWITCH UUIDs, and an AMD notification merging onto the
+recording. It needs the `mod-siprec-load` image (build once with
+`tests/load/run.sh` in the mod_siprec repo, ~30–45 min) and docker;
+set `DOCKER="sudo docker"` if your user is not in the docker group.
+
 ## Deployment notes
 
 - Run one instance per FreeSWITCH node (or centrally, if
   `SIPREC_LOCAL_IP` is reachable from every FreeSWITCH): there is no
   cross-instance state, and recordings land on the local disk + SQLite.
+- Set `RETENTION_DAYS` (or your own external rotation) — recordings
+  otherwise accumulate forever. The built-in sweep deletes rows and
+  WAV files together at startup and then daily.
+- A `Dockerfile` is included (`docker build -t siprec-receiver .`);
+  mount a volume at `/data` for the database + recordings. Container
+  networking caveat: the SDP answer advertises `SIPREC_LOCAL_IP`, so
+  the SRC must be able to route RTP to it — `--network host` is the
+  simple shape on a FreeSWITCH node.
 - Terminate TLS in front of `HTTP_LISTEN` (any reverse proxy) and set
   `PUBLIC_BASE_URL=https://…`. Keep the SIP listener firewalled to your
   FreeSWITCH hosts.
@@ -410,6 +448,8 @@ WantedBy=multi-user.target
 | AMD shows as its own row, never merges | The recording carries no `cb-callsid` and notifications carry no `SipCallId`/`FsUuid` — nothing links them; add a key on either side |
 | Sign-in ends at “not authorized” | The Google email is neither `ADMIN_EMAIL` nor in the Users list — an administrator must add it |
 | Everyone is signed out after restart | `SESSION_SECRET` unset (ephemeral) — set a stable value |
+| Call shows ⚠ write error; audio stops mid-call | Disk full (or `RECORDING_DIR` unwritable) during recording — the first failed write's error is on the call page; free space and the next call records cleanly |
+| A call from before a restart appears as `recovered-orphan` | Expected: the previous process died mid-recording and startup recovery adopted the WAV (see Wire behavior) |
 
 ## Contributing
 

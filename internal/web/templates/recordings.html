@@ -28,7 +28,7 @@
       <td>{{if .ToNumber}}{{.ToNumber}}{{else}}—{{end}}</td>
       <td>{{fmtDur .DurationSec}}</td>
       <td>{{if .AMDAnsweredBy}}<span class="badge amd">{{.AMDAnsweredBy}}</span>{{else}}—{{end}}</td>
-      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td><span class="badge {{.Status}}">{{.Status}}</span>{{if .HasWriteError}} <span class="badge" title="A leg hit a WAV write error">⚠ write error</span>{{end}}</td>
       <td>{{.LegCount}}</td>
       <td><a href="/recordings/{{.ID}}">View</a></td>
     </tr>

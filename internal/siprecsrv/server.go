@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/emiago/sipgo"
@@ -54,6 +55,7 @@ type FinalizedLeg struct {
 	StartedAt   time.Time
 	Metadata    *Recording // parsed RS-Metadata (same pointer for every leg of a call)
 	MetadataXML string     // raw RS-Metadata body as received; "" when absent
+	WriteErr    string     // first WAV write/close error, "" when the leg recorded cleanly
 }
 
 // Finalizer is notified once per leg when a SIPREC session ends (BYE or
@@ -119,7 +121,69 @@ type leg struct {
 	codec    string
 	port     int
 	receiver *rtp.Receiver
-	writer   *recording.Writer
+	writer   *legWriter
+}
+
+// legWriter owns one leg's WAV writer plus the first write error it
+// produced. The RTP callback runs on the receiver goroutine and the
+// writer is single-goroutine by contract, so appends stay on that
+// goroutine; the error slot is atomic because finalizeSession reads
+// it from another goroutine. Capturing the error matters: a full disk
+// otherwise truncates a recording silently — every Append fails, the
+// frames are dropped, and the finalized call looks healthy.
+type legWriter struct {
+	w    *recording.Writer
+	call string       // callID + label, for the one-time log line
+	err  atomic.Value // error, first one wins
+	once sync.Once
+}
+
+func (lw *legWriter) append(pcm []int16) {
+	if lw.w == nil {
+		return
+	}
+
+	if _, err := lw.w.Append(pcm); err != nil {
+		lw.noteErr(err)
+	}
+}
+
+func (lw *legWriter) noteErr(err error) {
+	lw.once.Do(func() {
+		lw.err.Store(err)
+		log.Printf("[siprecsrv] %s: WAV WRITE FAILED (recording degraded): %v", lw.call, err)
+	})
+}
+
+// Err returns the first write/close error, or nil.
+func (lw *legWriter) Err() error {
+	if v := lw.err.Load(); v != nil {
+		return v.(error)
+	}
+
+	return nil
+}
+
+func (lw *legWriter) durationSec() int {
+	if lw.w == nil {
+		return 0
+	}
+
+	return lw.w.DurationSec()
+}
+
+func (lw *legWriter) close() error {
+	if lw.w == nil {
+		return nil
+	}
+
+	if err := lw.w.Close(); err != nil {
+		lw.noteErr(err)
+
+		return err
+	}
+
+	return nil
 }
 
 // New builds a Server. Caller wires LocalIP, RecordingDir, PortPool (and
@@ -336,7 +400,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	rollback := func() {
 		for _, l := range legs {
 			l.receiver.Stop()
-			_ = l.writer.Close()
+			_ = l.writer.close()
 			s.PortPool.Release(l.port)
 		}
 	}
@@ -346,11 +410,12 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		// Acquire the leg's port and bind its receiver in one step, so a
 		// port another process already holds is skipped (#94). The receiver
-		// starts only after the WAV writer below is open.
-		var wr *recording.Writer
+		// starts only after the WAV writer below is open; the callback
+		// captures write failures on the legWriter.
+		lw := &legWriter{call: callID + " leg " + legLabel}
 
 		port, recv, err := rtp.AcquireBound(s.PortPool, func(p int) (*rtp.Receiver, error) {
-			return rtp.NewReceiver(p, func(pcm []int16) { _, _ = wr.Append(pcm) })
+			return rtp.NewReceiver(p, lw.append)
 		})
 		if err != nil {
 			reason := "no rtp ports available"
@@ -369,7 +434,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		wavPath := filepath.Join(s.RecordingDir,
 			fmt.Sprintf("%s-%s.wav", sanitiseCallID(callID), legLabel))
 
-		wr, err = recording.Open(wavPath, sipRecordingSampleRate, 1)
+		lw.w, err = recording.Open(wavPath, sipRecordingSampleRate, 1)
 		if err != nil {
 			log.Printf("[siprecsrv] %s: open wav %d: %v", callID, i, err)
 			recv.Stop()
@@ -383,7 +448,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		recv.Start()
 
-		l := &leg{label: legLabel, codec: m.CodecName, port: port, receiver: recv, writer: wr}
+		l := &leg{label: legLabel, codec: m.CodecName, port: port, receiver: recv, writer: lw}
 		legs = append(legs, l)
 		ports = append(ports, port)
 
@@ -507,11 +572,11 @@ func (s *Server) finalizeSession(ctx context.Context, sess *session) {
 	for _, l := range sess.legs {
 		l.receiver.Stop()
 
-		if err := l.writer.Close(); err != nil {
+		if err := l.writer.close(); err != nil {
 			log.Printf("[siprecsrv] %s: wav close: %v", sess.callID, err)
 		}
 
-		dur := l.writer.DurationSec()
+		dur := l.writer.durationSec()
 
 		s.PortPool.Release(l.port)
 
@@ -523,6 +588,11 @@ func (s *Server) finalizeSession(ctx context.Context, sess *session) {
 			fmt.Sprintf("%s-%s.wav", sanitiseCallID(sess.callID), l.label))
 
 		fsUUID, _ := sess.metadata.FsUUID()
+
+		writeErr := ""
+		if werr := l.writer.Err(); werr != nil {
+			writeErr = werr.Error()
+		}
 
 		if err := s.Finalizer.Finalize(ctx, FinalizedLeg{
 			CallID:      sess.callID,
@@ -537,6 +607,7 @@ func (s *Server) finalizeSession(ctx context.Context, sess *session) {
 			StartedAt:   sess.started,
 			Metadata:    sess.metadata,
 			MetadataXML: sess.metadataXML,
+			WriteErr:    writeErr,
 		}); err != nil {
 			log.Printf("[siprecsrv] %s: finalize leg %s: %v", sess.callID, l.label, err)
 		}
