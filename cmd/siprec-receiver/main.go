@@ -77,7 +77,7 @@ func envInt(key string, def int) int {
 			return n
 		}
 
-		log.Printf("[main] invalid %s=%q, using %d", key, v, def)
+		log.Printf("[main] invalid %s=%q, using %d", key, v, def) // #nosec G706 -- env name/value, quoted
 	}
 
 	return def

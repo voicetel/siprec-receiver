@@ -62,7 +62,7 @@ func open(path string, sampleRate, channels int, exclusive bool) (*Writer, error
 		flags = os.O_CREATE | os.O_WRONLY | os.O_EXCL
 	}
 
-	f, err := os.OpenFile(path, flags, 0o600)
+	f, err := os.OpenFile(path, flags, 0o600) // #nosec G304 -- path is server-generated or operator-configured
 	if err != nil {
 		return nil, fmt.Errorf("open wav %s: %w", path, err)
 	}
@@ -106,7 +106,7 @@ func (w *Writer) Append(pcm []int16) (int, error) {
 	// element; we do it inline because this is in the per-frame hot path
 	// (called every ~10–20 ms while a recording is active).
 	for i, s := range pcm {
-		binary.LittleEndian.PutUint16(w.scratch[2*i:], uint16(s))
+		binary.LittleEndian.PutUint16(w.scratch[2*i:], uint16(s)) // #nosec G115 -- int16 sample bit pattern
 	}
 
 	if _, err := w.f.Write(w.scratch); err != nil {
@@ -147,7 +147,7 @@ func (w *Writer) Close() error {
 		return fmt.Errorf("wav seek data size: %w", err)
 	}
 
-	if err := binary.Write(w.f, binary.LittleEndian, uint32(dataBytes)); err != nil {
+	if err := binary.Write(w.f, binary.LittleEndian, uint32(dataBytes)); err != nil { // #nosec G115 -- WAV size fields are uint32 by spec; the SRS leg sample cap bounds file size
 		_ = w.f.Close()
 
 		return fmt.Errorf("wav write data size: %w", err)
@@ -159,7 +159,7 @@ func (w *Writer) Close() error {
 		return fmt.Errorf("wav seek riff size: %w", err)
 	}
 
-	if err := binary.Write(w.f, binary.LittleEndian, uint32(36+dataBytes)); err != nil {
+	if err := binary.Write(w.f, binary.LittleEndian, uint32(36+dataBytes)); err != nil { // #nosec G115 -- WAV size fields are uint32 by spec; the SRS leg sample cap bounds file size
 		_ = w.f.Close()
 
 		return fmt.Errorf("wav write riff size: %w", err)

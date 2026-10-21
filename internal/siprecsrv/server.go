@@ -60,8 +60,7 @@ const (
 	rateAllowanceBase   = 24000           // samples of burst headroom
 )
 
-// reaperInterval is a var so tests can shrink the reaper's tick.
-var reaperInterval = 15 * time.Second
+const reaperInterval = 15 * time.Second
 
 // FinalizedLeg describes one completed, closed recording leg — everything
 // a Finalizer needs to persist it.
@@ -101,6 +100,8 @@ type sharedState struct {
 	maxSessions int
 	idleTimeout time.Duration
 
+	reaperTick time.Duration // how often the reaper scans; tests shrink it
+
 	mu         sync.Mutex
 	sessions   map[string]*session
 	reaperOnce sync.Once
@@ -133,6 +134,7 @@ func New(localIP, recordingDir string, portPool *rtp.PortPool) *Server {
 		pool:         portPool,
 		maxSessions:  defaultMaxSessions,
 		idleTimeout:  defaultIdleTimeout,
+		reaperTick:   reaperInterval,
 		sessions:     make(map[string]*session),
 	}
 
@@ -472,7 +474,7 @@ func (sh *sharedState) startReaper(ctx context.Context) {
 // network dropped) and drops pending reservations that never
 // completed, so neither ports nor files leak forever.
 func (sh *sharedState) reaperLoop(ctx context.Context) {
-	ticker := time.NewTicker(reaperInterval)
+	ticker := time.NewTicker(sh.reaperTick)
 	defer ticker.Stop()
 
 	for {

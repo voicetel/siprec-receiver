@@ -320,9 +320,9 @@ func (a *Authenticator) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	state := randomToken()
 	verifier := oauth2.GenerateVerifier()
 
-	for _, c := range []*http.Cookie{
-		{Name: stateCookie, Value: state},
-		{Name: verifierCookie, Value: verifier},
+	for _, c := range []*http.Cookie{ // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
+		{Name: stateCookie, Value: state}, // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
+		{Name: verifierCookie, Value: verifier}, // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 	} {
 		c.Path = "/auth/"
 		c.MaxAge = int(stateTTL.Seconds())
@@ -351,7 +351,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 
 	// One-time flow cookies: clear whatever the outcome.
 	for _, name := range []string{stateCookie, verifierCookie} {
-		http.SetCookie(w, &http.Cookie{
+		http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 			Name: name, Value: "", Path: "/auth/", MaxAge: -1,
 			HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: a.secureCookies(),
 		})
@@ -427,7 +427,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("[auth] authorization for %s failed: %v", email, err)
+		log.Printf("[auth] authorization for %q failed: %v", email, err) // #nosec G706 -- quoted values
 		http.Error(w, "authorization check failed", http.StatusInternalServerError)
 
 		return
@@ -441,7 +441,7 @@ func (a *Authenticator) HandleCallback(w http.ResponseWriter, r *http.Request) {
 // cross-site GET cannot log a user out).
 func (a *Authenticator) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{a.cookieName(), "sr_session", "__Host-sr_session"} {
-		http.SetCookie(w, &http.Cookie{
+		http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 			Name:     name,
 			Value:    "",
 			Path:     "/",
@@ -475,7 +475,7 @@ func (a *Authenticator) setSession(w http.ResponseWriter, user *SessionUser) {
 	body := base64.RawURLEncoding.EncodeToString(payload)
 	value := body + "." + a.sign(body)
 
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 		Name:     a.cookieName(),
 		Value:    value,
 		Path:     "/",

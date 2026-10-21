@@ -233,7 +233,7 @@ func (r *Receiver) loop() {
 		// reordering sane. Late/duplicate packets are dropped, gaps
 		// count as loss.
 		if r.seqInit {
-			diff := int16(header.SequenceNumber - (r.lastSeq + 1))
+			diff := int16(header.SequenceNumber - (r.lastSeq + 1)) // #nosec G115 -- RFC 3550 sequence wrap arithmetic
 			if diff < 0 {
 				continue
 			}
@@ -252,7 +252,7 @@ func (r *Receiver) loop() {
 		// lastTS is the next expected timestamp, so the signed
 		// delta is exactly the number of missing samples.
 		if r.tsInit && r.callback != nil {
-			missing := int64(int32(header.Timestamp - r.lastTS))
+			missing := int64(int32(header.Timestamp - r.lastTS)) // #nosec G115 -- RTP timestamp wrap arithmetic
 
 			switch {
 			case missing > 0:
@@ -281,7 +281,7 @@ func (r *Receiver) loop() {
 			r.callback(pcm[:nSamples])
 		}
 
-		r.lastTS = header.Timestamp + uint32(len(payload))
+		r.lastTS = header.Timestamp + uint32(len(payload)) // #nosec G115 -- payload is MTU-bounded
 		r.tsInit = true
 	}
 }

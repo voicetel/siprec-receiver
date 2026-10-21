@@ -297,7 +297,7 @@ func (s *Server) handleAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path confined to RECORDING_DIR by safeWAVPath
 	if err != nil {
 		http.NotFound(w, r)
 
@@ -352,7 +352,7 @@ func (s *Server) audit(r *http.Request, action, target, detail string) {
 	}
 
 	if err := s.Store.Audit(r.Context(), actor, action, target, detail); err != nil {
-		log.Printf("[web] audit %s %s: %v", action, target, err)
+		log.Printf("[web] audit %q %q: %v", action, target, err) // #nosec G706 -- quoted values
 	}
 }
 
@@ -385,7 +385,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("[web] admin %s deleted call %d (%d file(s))", user.Email, id, len(paths))
+	log.Printf("[web] admin %q deleted call %d (%d file(s))", user.Email, id, len(paths)) // #nosec G706 -- quoted values
 	s.audit(r, "recording.delete", strconv.FormatInt(id, 10),
 		fmt.Sprintf("%d file(s) removed", len(paths)))
 	http.Redirect(w, r, "/recordings?msg=Recording+deleted", http.StatusSeeOther)
@@ -473,7 +473,7 @@ func (s *Server) handleFetchRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[web] %s fetched VoiceML record for call %d (CallSid %s, status %s)",
+	log.Printf("[web] %q fetched VoiceML record for call %d (CallSid %q, status %q)", // #nosec G706 -- quoted values
 		user.Email, id, call.CallSid, rec.Status)
 	s.audit(r, "record.fetch", strconv.FormatInt(id, 10),
 		"CallSid "+call.CallSid+" status "+rec.Status)
@@ -532,13 +532,13 @@ func (s *Server) handleUserUpsert(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
-		log.Printf("[web] upsert user %s: %v", email, err)
+		log.Printf("[web] upsert user %q: %v", email, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to save user", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s saved user %s role=%s", user.Email, email, role)
+	log.Printf("[web] admin %q saved user %q role=%s", user.Email, email, role) // #nosec G706 -- quoted values
 	s.audit(r, "user.upsert", email, "role="+role)
 	http.Redirect(w, r, "/admin/users?msg=User+saved", http.StatusSeeOther)
 }
@@ -559,13 +559,13 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := s.Store.DeleteUser(r.Context(), email); err != nil {
-		log.Printf("[web] delete user %s: %v", email, err)
+		log.Printf("[web] delete user %q: %v", email, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to delete user", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s deleted user %s", user.Email, email)
+	log.Printf("[web] admin %q deleted user %q", user.Email, email) // #nosec G706 -- quoted values
 	s.audit(r, "user.delete", email, "")
 	http.Redirect(w, r, "/admin/users?msg=User+deleted", http.StatusSeeOther)
 }
@@ -581,13 +581,13 @@ func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
 	email := store.NormalizeEmail(r.FormValue("email"))
 
 	if err := s.Store.BumpSessionEpoch(r.Context(), email); err != nil {
-		log.Printf("[web] revoke sessions %s: %v", email, err)
+		log.Printf("[web] revoke sessions %q: %v", email, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to revoke sessions", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s revoked sessions for %s", user.Email, email)
+	log.Printf("[web] admin %q revoked sessions for %q", user.Email, email) // #nosec G706 -- quoted values
 	s.audit(r, "user.revoke_sessions", email, "")
 	http.Redirect(w, r, "/admin/users?msg=Sessions+revoked", http.StatusSeeOther)
 }
@@ -658,13 +658,13 @@ func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request)
 		CreatedBy:  user.Email,
 	})
 	if err != nil {
-		log.Printf("[web] upsert cb account %s: %v", accountSid, err)
+		log.Printf("[web] upsert VoiceML account %q: %v", accountSid, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to save integration", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s saved VoiceML key for account %s", user.Email, accountSid)
+	log.Printf("[web] admin %q saved VoiceML key for account %q", user.Email, accountSid) // #nosec G706 -- quoted values
 	s.audit(r, "voicemlkey.save", accountSid, "")
 	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+saved", http.StatusSeeOther)
 }
@@ -680,13 +680,13 @@ func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request)
 	accountSid := strings.TrimSpace(r.FormValue("account_sid"))
 
 	if _, err := s.Store.DeleteVoiceMLAccount(r.Context(), accountSid); err != nil {
-		log.Printf("[web] delete cb account %s: %v", accountSid, err)
+		log.Printf("[web] delete VoiceML account %q: %v", accountSid, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to delete integration", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s deleted VoiceML key for account %s", user.Email, accountSid)
+	log.Printf("[web] admin %q deleted VoiceML key for account %q", user.Email, accountSid) // #nosec G706 -- quoted values
 	s.audit(r, "voicemlkey.delete", accountSid, "")
 	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+deleted", http.StatusSeeOther)
 }

@@ -21,7 +21,7 @@ import (
 // The sample rate is assumed to be 8000 Hz mono (the only format the
 // SRS writes); duration follows the Writer's round-up rule.
 func RepairWAV(path string) (durationSec int, err error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- path from the recording directory or a leg row
 	if err != nil {
 		return 0, fmt.Errorf("repair wav %s: %w", path, err)
 	}
@@ -47,12 +47,16 @@ func RepairWAV(path string) (durationSec int, err error) {
 	}
 
 	dataBytes := info.Size() - 44
+	if dataBytes < 0 || dataBytes > 0xFFFFFFFF-36 {
+		return 0, fmt.Errorf("repair wav %s: %d data bytes exceeds the WAV uint32 size space", path, dataBytes)
+	}
+
 	if dataBytes%2 != 0 {
 		dataBytes-- // a torn final sample is not playable; drop it
 	}
 
-	riffSize := uint32(36 + dataBytes)
-	dataSize := uint32(dataBytes)
+	riffSize := uint32(36 + dataBytes) // #nosec G115 -- range-checked above
+	dataSize := uint32(dataBytes)      // #nosec G115 -- range-checked above
 
 	if binary.LittleEndian.Uint32(header[4:8]) != riffSize ||
 		binary.LittleEndian.Uint32(header[40:44]) != dataSize {

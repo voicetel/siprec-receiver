@@ -234,14 +234,11 @@ func TestHardening_ShutdownFinalizes(t *testing.T) {
 // TestHardening_ReaperFinalizesIdle: a session whose BYE never
 // arrives is finalized after the idle timeout.
 func TestHardening_ReaperFinalizesIdle(t *testing.T) {
-	oldInterval := reaperInterval
-	reaperInterval = 50 * time.Millisecond
-	defer func() { reaperInterval = oldInterval }()
-
 	finalizer := &fakeFinalizer{}
 	srv := New("127.0.0.1", t.TempDir(), rtp.NewPortPool(44800, 44900))
 	srv.Finalizer = finalizer
 	srv.SetLimits(nil, 0, 120*time.Millisecond)
+	srv.shared.reaperTick = 50 * time.Millisecond
 
 	addr := startTestServer(t, srv)
 	_, portStr, _ := net.SplitHostPort(addr)
