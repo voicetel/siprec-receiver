@@ -30,11 +30,14 @@ siprec-receiver has three network surfaces, with different trust
 models:
 
 - **SIP/SIPREC listener (`SIPREC_LISTEN`)** — SIPREC (RFC 7866) has
-  no in-band authentication: anyone who can reach this listener can
-  offer recordings. It must be firewalled to your FreeSWITCH/SRC
-  hosts only. The SDP answer advertises `SIPREC_LOCAL_IP`; the RTP
-  port range (`RTP_PORT_MIN`–`RTP_PORT_MAX`) must likewise only be
-  reachable from those hosts.
+  no in-band authentication. Set `SIPREC_ALLOW_CIDRS` to your
+  FreeSWITCH/SRC hosts (and firewall equivalently): other sources
+  get 403. In-dialog requests are additionally bound to the
+  INVITE's From-tag and source IP, streams per INVITE and
+  concurrent sessions are capped, and idle sessions are reaped.
+  The SDP answer advertises `SIPREC_LOCAL_IP`, which the RTP
+  receivers also bind; each leg locks onto its first RTP sender
+  (source + SSRC) and drops everything else.
 - **AMD notify endpoint (`POST /api/notify/amd`)** — authenticated
   with the `NOTIFY_SECRET` shared secret (Bearer header preferred;
   the `?secret=` form exists for webhook senders that cannot set
@@ -43,12 +46,18 @@ models:
   if a posting system is decommissioned.
 - **Web UI (`HTTP_LISTEN`)** — Google OAuth sign-in plus an
   allowlist. Only the `ADMIN_EMAIL` bootstrap administrator and
-  users an administrator adds can sign in; roles are re-checked on
-  every request. Serve it over HTTPS (reverse proxy) with
-  `PUBLIC_BASE_URL=https://…` so session cookies are `Secure`.
-  `SESSION_SECRET` must be a stable random value in production.
-  **Never set `DEV_AUTH_EMAIL` in production** — it bypasses Google
-  sign-in entirely.
+  users an administrator adds can sign in; roles, the pinned
+  Google account ID (`sub`), and a per-user session epoch are
+  re-checked on every request, and administrators can revoke a
+  user's sessions instantly. `GOOGLE_HOSTED_DOMAIN` optionally
+  pins sign-in to one Workspace domain. Administrative actions
+  are written to an audit log shown to administrators. Serve it
+  over HTTPS (reverse proxy) with `PUBLIC_BASE_URL=https://…` so
+  session cookies are `Secure`.
+  `SESSION_SECRET` must be a stable random value (32+ bytes) in
+  production. **Never set `DEV_AUTH_EMAIL` in production** — it
+  bypasses Google sign-in entirely, and the binary refuses to
+  start with it on a non-loopback HTTP listener.
 
 Recordings are sensitive: WAV files are written `0600` under
 `RECORDING_DIR`, are only served to authenticated users after a

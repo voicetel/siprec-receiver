@@ -38,7 +38,7 @@ and reviewer roles.
 ```
 
 The SRS core (`internal/siprecsrv`, `internal/rtp`, and the
-`internal/recording` WAV writer) is extracted from callBroadcast's
+`internal/recording` WAV writer) is extracted from VoiceML's
 production SIPREC receiver; the SQLite store, the AMD notification
 endpoint, and the web UI are new in this repository.
 
@@ -113,20 +113,24 @@ All configuration is environment variables (see also `.env.example`).
 |---|---|---|
 | `SIPREC_LISTEN` | `127.0.0.1:5070` | SIP listen address for the SRS |
 | `SIPREC_NETWORKS` | `udp,tcp` | SIP transports to listen on (comma list) |
-| `SIPREC_LOCAL_IP` | `127.0.0.1` | IP advertised in the SDP answer (`c=IN IP4`) — must be reachable by the SRC's RTP fork |
+| `SIPREC_LOCAL_IP` | `127.0.0.1` | IP advertised in the SDP answer (`c=IN IP4`) and bound by the RTP receivers — must be reachable by the SRC's RTP fork |
+| `SIPREC_ALLOW_CIDRS` | — (any source) | Comma list of CIDRs/IPs allowed to send SIPREC INVITEs; sources outside get 403. Set this (or firewall equivalently) in production |
+| `SIPREC_MAX_SESSIONS` | `256` | Concurrent SIPREC sessions cap; further INVITEs get 503 |
+| `SIPREC_SESSION_IDLE_SEC` | `300` | Finalize a session after this many seconds with no SIP message and no RTP (lost BYE, crashed SRC) |
 | `SIP_TLS_LISTEN` | `127.0.0.1:5071` | TLS (SIPS) listen address, used only when cert+key are set |
-| `SIP_TLS_CERT` / `SIP_TLS_KEY` | — | PEM files enabling the SIPS listener |
+| `SIP_TLS_CERT` / `SIP_TLS_KEY` | — | PEM files enabling the SIPS listener (must be set together) |
 | `RTP_PORT_MIN` / `RTP_PORT_MAX` | `41000` / `42000` | UDP port pool for RTP receivers (even ports only, per RTP convention) |
-| `RECORDING_DIR` | `./data/recordings` | Where WAV files are written (`0600` permissions) |
-| `DB_PATH` | `./data/siprec-receiver.db` | SQLite database path (WAL mode) |
+| `RECORDING_DIR` | `./data/recordings` | Where WAV files are written (`0600` files in a `0700` directory) |
+| `DB_PATH` | `./data/siprec-receiver.db` | SQLite database path (WAL mode, `0600`) |
 | `HTTP_LISTEN` | `127.0.0.1:8080` | Web UI + notify endpoint listen address |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8080` | Public base URL; the OAuth redirect is `<base>/auth/callback` |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth client (see below) |
-| `SESSION_SECRET` | ephemeral | HMAC secret for session cookies; set a stable random value in production or every restart signs everyone out |
+| `GOOGLE_HOSTED_DOMAIN` | — | When set, sign-in requires a Google Workspace account from this domain (the `hd` claim) |
+| `SESSION_SECRET` | ephemeral | HMAC secret for session cookies (at least 32 bytes when set); set a stable random value in production or every restart signs everyone out |
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
 | `RETENTION_DAYS` | `0` (disabled) | Delete calls (rows + WAV files) that started more than this many days ago; swept at startup, then daily |
-| `CALLBROADCAST_BASE_URL` | — (fetches disabled) | Base URL of the callBroadcast deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations) |
+| `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations) |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
 
 Put the HTTP listener behind a TLS-terminating reverse proxy in
@@ -181,28 +185,51 @@ parameters, e.g. mod_siprec's per-call ad-hoc form:
 
 ```xml
 <action application="siprec"
-        data="myrec sip:srs.example.com:5070;cb-callsid=CA0123456789abcdef0123456789abcdef;cb-account=AC0123456789abcdef0123456789abcdef"/>
+        data="myrec sip:srs.example.com:5070;vm-callsid=CA0123456789abcdef0123456789abcdef;vm-account=AC0123456789abcdef0123456789abcdef"/>
 ```
 
 | Parameter | Stored as | Purpose |
 |---|---|---|
-| `cb-callsid` | `call_sid` | Lets AMD notifications (keyed by CallSid) merge with this recording automatically |
-| `cb-account` | `account_sid` | Tenant/account attribution, shown in the UI |
+| `vm-callsid` | `call_sid` | Lets AMD notifications (keyed by CallSid) merge with this recording automatically |
+| `vm-account` | `account_sid` | Tenant/account attribution, shown in the UI |
 
 ## Wire behavior
 
 - **INVITE:** the body must contain an SDP part; an RS-Metadata part is
   used for naming/correlation when present and ignored (with positional
   leg labels) when absent or malformed. A body with no SDP is a 400.
+  Sources outside `SIPREC_ALLOW_CIDRS` get 403; more than 8 offered
+  streams gets 488; at the session cap, 503.
 - **200 OK:** always plain `application/sdp` — one `m=audio` per offered
-  stream with an SRS-pool port, the chosen G.711 payload type,
-  `a=recvonly`, and the offer's `a=label` echoed. (Some SRC answer-side
-  parsers do not extract SDP from a multipart 200; plain SDP is the
-  interoperable choice.)
-- **Recorded files:** `<RECORDING_DIR>/<sanitised SIP Call-ID>-<label>.wav`,
-  where `<label>` is the sending participant's number from RS-Metadata
-  when resolvable (`…-12165285911.wav`), else the SDP label, else
-  `leg<N>`. WAV files are written `0600`.
+  stream with an SRS-pool port, the chosen G.711 payload type (the first
+  offered PCMU/PCMA, dynamic payload types included; the answer always
+  uses the static PT), `a=recvonly` (`a=inactive` for an inactive
+  offer), the offer's `a=label` echoed, a `Contact` for the dialog,
+  and an `o=` version that increases on every re-INVITE answer.
+  Offered port-0 streams are answered port 0 and never recorded.
+  (Some SRC answer-side parsers do not extract SDP from a multipart
+  200; plain SDP is the interoperable choice.)
+- **Dialog integrity:** sessions are shared across all transports (a
+  dialog may start on UDP and end on TCP). In-dialog requests (BYE,
+  re-INVITE) must match the INVITE's From-tag and source IP, or they
+  get 481 and the recording is untouched — knowing a Call-ID is not
+  enough to stop or replace someone else's recording.
+- **Recorded files:** `<RECORDING_DIR>/<random>.wav` — server-generated
+  names opened with `O_EXCL`, so a reused or colliding Call-ID can
+  never overwrite an existing recording, and filenames leak neither
+  Call-IDs nor phone numbers. Each leg's display label (the sending
+  participant's number from RS-Metadata when resolvable, else the SDP
+  label, else `leg<N>`) lives in the database. WAV files are written
+  `0600` in a `0700` directory.
+- **RTP discipline:** receivers bind the advertised `SIPREC_LOCAL_IP`
+  and lock onto the first (source, SSRC) they see — anything else is
+  dropped, so stray packets cannot inject audio into a recording.
+  Sequence gaps are filled with silence from RTP timestamps (duration
+  stays honest, legs stay in sync), late packets are dropped, padding
+  is stripped, and ports are reused first-in-first-out so a previous
+  call's teardown tail cannot land in the next call. A leg's sample
+  budget (rate vs. wall clock, 4 h hard cap) stops packet floods from
+  filling the disk through one port.
 - **Pause semantics:** while a recording is paused the SRC forks no
   RTP, so paused wall-clock time is *compressed out* of the WAV — the
   file (and `duration_sec`, which counts recorded samples) contains
@@ -214,11 +241,13 @@ parameters, e.g. mod_siprec's per-call ad-hoc form:
   ⚠ badge in the list, the error text on the call page). The audio
   after the failure point is lost, but the record says so.
 - **Ports:** one even UDP port per stream from the `RTP_PORT_MIN`–
-  `RTP_PORT_MAX` pool, released on BYE. Pool exhaustion answers 500 and
-  records nothing.
-- **Dialog end:** BYE closes the WAVs and finalizes the call within a
-  second; a dialog that never sends BYE keeps its files open (watch for
-  SRC crashes stranding ports — the pool size bounds concurrent calls).
+  `RTP_PORT_MAX` pool, released when the session ends. Pool exhaustion
+  answers 500 and records nothing.
+- **Dialog end:** BYE is answered first, then closes the WAVs and
+  finalizes the call. A dialog that never sends BYE is finalized by
+  the idle reaper after `SIPREC_SESSION_IDLE_SEC` without SIP or RTP
+  activity, and a graceful shutdown finalizes every active session
+  before exiting — recordings are not stranded by restarts.
 - **Crash recovery:** if the SRS itself dies mid-recording, the WAVs
   on disk are adopted at the next startup: their headers are repaired
   in place (a crashed file still carries the writer's placeholder
@@ -230,17 +259,17 @@ parameters, e.g. mod_siprec's per-call ad-hoc form:
 ## AMD call notifications
 
 `POST /api/notify/amd` logs the AMD disposition for a call. It exists so
-the answering-machine verdict produced during dialing (by callBroadcast,
+the answering-machine verdict produced during dialing (by VoiceML,
 a dialer, or any AMD engine) ends up on the same record as the audio.
 
-It accepts the exact field names callBroadcast POSTs to an
+It accepts the exact field names VoiceML POSTs to an
 `AsyncAmdStatusCallback` URL, as form-encoding (the webhook shape) or
 JSON:
 
 | Field | Notes |
 |---|---|
-| `AnsweredBy` | **Required.** `human`, `machine_start`, `machine_end_beep`, `machine_end_silence`, `machine_end_other`, `fax`, `unknown`. callBroadcast's extended `screened`, `screened_ivr`, `disconnected` are also stored; other values are stored verbatim (a logging endpoint must not drop dispositions) |
-| `CallSid` | Correlation key: matches a recording stamped `cb-callsid` |
+| `AnsweredBy` | **Required.** `human`, `machine_start`, `machine_end_beep`, `machine_end_silence`, `machine_end_other`, `fax`, `unknown`. VoiceML's extended `screened`, `screened_ivr`, `disconnected` are also stored; other values are stored verbatim (a logging endpoint must not drop dispositions) |
+| `CallSid` | Correlation key: matches a recording stamped `vm-callsid` |
 | `MachineDetectionDuration` | Milliseconds to verdict |
 | `AccountSid`, `From`, `To`, `CallStatus`, `Direction` | Stored with the disposition; `Caller`/`Called` are accepted as `From`/`To` synonyms |
 | `SipCallId` | The SIPREC recording dialog's SIP Call-ID — direct match |
@@ -251,7 +280,7 @@ correlated and is rejected with 400.
 
 Auth is the `NOTIFY_SECRET` shared secret, presented as
 `Authorization: Bearer <secret>` (or the `X-Notify-Secret` header, or
-`?secret=` for webhook senders that cannot set headers — callBroadcast's
+`?secret=` for webhook senders that cannot set headers — VoiceML's
 sender is one). With no secret configured the endpoint answers 503
 rather than running open.
 
@@ -265,7 +294,7 @@ Notifications are upserts, order-independent:
   placeholder row disappears.
 
 ```sh
-# Form-encoded (the callBroadcast/Twilio webhook shape)
+# Form-encoded (the VoiceML/Twilio webhook shape)
 curl -X POST https://srs.example.com/api/notify/amd \
   -H "Authorization: Bearer $NOTIFY_SECRET" \
   --data-urlencode "CallSid=CA0123456789abcdef0123456789abcdef" \
@@ -317,22 +346,22 @@ curl -X POST https://srs.example.com/api/notify/disposition \
 The list view shows the outcome next to the AMD disposition; the call
 page shows duration, SIP code, error, and the raw payload.
 
-## Full call record from callBroadcast (on request)
+## Full call record from VoiceML (on request)
 
 A recording row can be enriched with the complete calling record from
-callBroadcast — final status, billable duration, price, timestamps,
+VoiceML — final status, billable duration, price, timestamps,
 `answered_by`, everything in the Call resource. Nothing is fetched
 automatically: a signed-in user clicks **Fetch full record from
-callBroadcast** on the call page (`POST /recordings/{id}/fetch-record`),
+VoiceML** on the call page (`POST /recordings/{id}/fetch-record`),
 the receiver GETs
 `/2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json` with the
 account's API key as Basic auth, stores the pretty-printed JSON on the
 call, and fills any still-empty identity/disposition fields from it
 (recording-owned fields are never overwritten).
 
-Because callBroadcast keys are per-account, an administrator stores
+Because VoiceML keys are per-account, an administrator stores
 one key per AccountSid under **Integrations** in the UI (with
-`CALLBROADCAST_BASE_URL` set in the environment). Keys are write-only
+`VOICEML_BASE_URL` set in the environment). Keys are write-only
 — never rendered back — and are used solely as the fetch's Basic-auth
 password. Fetch failures surface as a page message with the HTTP
 status; upstream error bodies are never proxied into the page (they
@@ -350,10 +379,12 @@ is needed.
 | List/search/filter recordings | ✅ | ✅ |
 | Open a call: metadata, raw RS-Metadata + AMD payload | ✅ | ✅ |
 | Play audio in the browser, download WAVs | ✅ | ✅ |
-| Fetch/refresh the full call record from callBroadcast | ✅ | ✅ |
+| Fetch/refresh the full call record from VoiceML | ✅ | ✅ |
 | Delete a recording (row + WAV files) | ✅ | ❌ (403) |
 | Add/remove users, grant the admin role | ✅ | ❌ (403) |
-| Store/remove per-account callBroadcast API keys | ✅ | ❌ (403) |
+| Revoke a user's sessions (sign them out everywhere) | ✅ | ❌ (403) |
+| Store/remove per-account VoiceML API keys | ✅ | ❌ (403) |
+| View the audit log | ✅ | ❌ (403) |
 
 - **Administrator** — the `ADMIN_EMAIL` bootstrap address (always admin,
   cannot be removed in the UI), plus any added user whose role is
@@ -361,13 +392,30 @@ is needed.
 - **User** — anyone an administrator adds under **Users** with the
   `user` role. Users review recordings; they cannot change anything.
 
+Identity is pinned, not just allowlisted: a user's first sign-in
+records their Google account ID (`sub`), and later sign-ins must
+present the same one — an allowlisted email address, which anyone
+can register a Google account for, stops being sufficient on its
+own. With `GOOGLE_HOSTED_DOMAIN` set, sign-in additionally requires
+a Workspace account from that domain. **Revoke sessions** bumps a
+per-user epoch that invalidates every outstanding cookie at once.
+Every administrative action (deletions, user and key changes,
+session revocations, record fetches) is written to the **Audit log**
+(who, what, when) and shown to administrators.
+
+There is deliberately **no per-tenant scoping**: every signed-in
+reviewer sees every recording. The allowlist is the access model —
+add exactly the people who may review all calls.
+
 The recordings list filters by free text (number, CallSid, SIP
 Call-ID, FreeSWITCH UUID) and by AMD disposition, 50 calls per page.
 Each call's page shows every stored field, one audio player + download
 link per leg, and collapsible raw AMD/metadata payloads. Anonymous
 requests redirect to the sign-in page; `GET /healthz` is the only
 unauthenticated route besides the OAuth flow and the secret-gated
-notify endpoint.
+notify endpoints. Sign-out is a POST form (a cross-site GET cannot
+log a user out), and all responses carry `X-Frame-Options: DENY`, a
+frame-ancestors CSP, and `nosniff`.
 
 ## Architecture
 
@@ -377,24 +425,26 @@ internal/siprecsrv/    The SRS: INVITE/ACK/BYE, SDP offer/answer, RS-Metadata
 internal/rtp/          UDP RTP receiver (G.711 decode, loss tracking), port pool
 internal/recording/    Streaming WAV writer (header patched on close)
 internal/store/        SQLite store: calls, legs, users; SRS Finalizer; AMD merge
-internal/cbclient/     callBroadcast Call-record fetcher (Basic auth, Twilio JSON)
+internal/voiceml/     VoiceML Call-record fetcher (Basic auth, Twilio JSON)
 internal/auth/         Google OAuth, signed sessions, RequireAuth/RequireAdmin
 internal/web/          UI handlers + embedded templates, notify endpoints
 ```
 
 One process, two listener families:
 
-- **SIP (per transport in `SIPREC_NETWORKS`)** — one `siprecsrv.Server`
-  per transport, sharing the RTP port pool, the recording directory,
-  and the store. A SIPREC dialog stays on its starting transport, so
-  the per-instance session maps never need to agree.
-- **HTTP** — the UI, the OAuth flow, `/healthz`, and
-  `/api/notify/amd` on `HTTP_LISTEN`.
+- **SIP (per transport in `SIPREC_NETWORKS`)** — one listener per
+  transport, all clones of one server family sharing a single session
+  map, the RTP port pool, the recording directory, and the store —
+  so a dialog that starts on UDP can send its BYE on TCP.
+- **HTTP** — the UI, the OAuth flow, `/healthz`, and the notify
+  endpoints on `HTTP_LISTEN`.
 
 Concurrency: sipgo runs SIP transactions on its own goroutines; each
 recording leg owns one RTP receive goroutine and one WAV writer
-(single-writer by contract). SQLite is opened with one connection in
-WAL mode, so finalize, notify, and UI writes serialize cleanly.
+(single-writer by contract; write errors are captured on the leg and
+surfaced at finalize). A background reaper finalizes idle sessions.
+SQLite is opened with one connection in WAL mode, so finalize,
+notify, and UI writes serialize cleanly.
 
 ### Data model (SQLite)
 
@@ -410,20 +460,26 @@ or the merge of both:
   `amd_notified_at`, `amd_raw`
 
 `legs` — one row per recorded stream: `label`, `codec`,
-`participant_aor`, `wav_path`, `duration_sec`. Files live in
-`RECORDING_DIR`; deleting a call in the UI deletes its rows and files.
+`participant_aor`, `wav_path`, `duration_sec`, `write_error`. Files
+live in `RECORDING_DIR` under random names; deleting a call in the
+UI deletes its rows and files.
 
 `users` — the UI allowlist: `email` (primary key, normalized),
-`role` (`admin` | `user`), `created_by`, `created_at`, `disabled`.
+`role` (`admin` | `user`), `created_by`, `created_at`, `disabled`,
+`google_sub` (pinned Google account ID), `session_epoch`
+(revocation counter).
 
-`cb_accounts` — per-account callBroadcast API keys for on-request
+`audit_log` — administrative actions: `actor`, `action`, `target`,
+`detail`, `created_at`.
+
+`voiceml_accounts` — per-account VoiceML API keys for on-request
 record fetches: `account_sid` (primary key), `api_key`, `created_by`,
 timestamps. Treat the database file as credential material.
 
 Disposition columns on `calls`: `disp_status`, `disp_duration_sec`,
 `disp_sip_code`, `disp_error_code`, `disp_error_message`,
 `disp_notified_at`, `disp_raw`; fetched-record columns:
-`cb_record_json`, `cb_fetched_at`.
+`voiceml_record_json`, `voiceml_fetched_at`.
 
 ## Development
 
@@ -436,23 +492,41 @@ make build
 What the tests prove (no FreeSWITCH needed):
 
 - `internal/siprecsrv` — full SIPREC dialogs over real SIP/TCP with a
-  sipgo client: two-leg INVITE → named WAVs → BYE → per-leg finalize;
+  sipgo client: two-leg INVITE → WAVs → BYE → per-leg finalize;
   port-pool exhaustion answers 500 and rolls back; the mod_siprec
   lifecycle (INVITE → pause re-INVITE → resume re-INVITE → BYE)
   finalizes exactly once; mod_siprec-shaped metadata (group, base64
-  session_id) parses and round-trips the FreeSWITCH UUID.
+  session_id) parses and round-trips the FreeSWITCH UUID. Hardening:
+  the 200 OK carries a Contact; a foreign-dialog BYE gets 481 and
+  changes nothing; allowlist outsiders get 403; over-cap stream
+  counts get 488; shutdown and the idle reaper finalize sessions;
+  codec choice scans every offered payload type (telephone-event or
+  dynamic PTs first); port-0 streams are answered port 0; re-INVITE
+  answers bump the SDP `o=` version and answer inactive with
+  inactive.
+- `internal/rtp` — G.711 decode through the real receiver over UDP;
+  RTP padding is stripped, not decoded; the receiver locks to the
+  first (source, SSRC) and drops the rest; timestamp gaps become
+  silence; ports recycle FIFO.
 - `internal/store` — two legs merge into one call; AMD-after-recording
   updates; AMD-before-recording is adopted by `CallSid`; keyless AMD is
-  rejected; user CRUD; delete returns the WAV paths.
+  rejected; a second dialog carrying an owned `CallSid` records under
+  its own Call-ID instead of failing; search wildcards match
+  literally; user CRUD; delete returns the WAV paths; pre-rename
+  databases migrate (table/column renames) with data intact.
 - `internal/web` / `internal/auth` — notify endpoint auth (401/400/200)
   and Twilio-form parsing; anonymous redirect; admin vs. user
   authorization (users get 403 on delete and user-admin, 200 on review
   and audio); audio paths outside `RECORDING_DIR` are refused; session
-  tampering and CSRF failures are rejected.
+  tampering and CSRF failures are rejected; Google `sub` pinning
+  (a different Google account for an allowlisted email is refused);
+  epoch revocation kills outstanding sessions; hardening headers on
+  every response; logout is POST-only; admin actions land in the
+  audit log.
 - `internal/store` (dispositions + fetched records) — disposition
-  before/after the recording merges like AMD; a fetched callBroadcast
+  before/after the recording merges like AMD; a fetched VoiceML
   record denormalizes without overwriting recording fields.
-- `internal/cbclient` + the fetch flow — Twilio-shaped Call JSON
+- `internal/voiceml` + the fetch flow — Twilio-shaped Call JSON
   (string `duration`), per-account Basic auth, upstream errors reduced
   to a status (never echoing account SIDs), API keys never rendered
   back into HTML.
@@ -509,13 +583,18 @@ WantedBy=multi-user.target
 | Symptom | Likely cause |
 |---|---|
 | INVITE answered 500 `no rtp ports available` | Port pool exhausted — too many concurrent recordings or BYEs not arriving; widen `RTP_PORT_MIN/MAX` |
+| INVITE answered 403 | Source IP is outside `SIPREC_ALLOW_CIDRS` — add the FreeSWITCH host's CIDR |
+| INVITE answered 503 `session limit` | `SIPREC_MAX_SESSIONS` concurrent sessions reached (or a flood — check the source) |
+| INVITE answered 488 | More than 8 `m=audio` streams offered |
 | INVITE answered 400 `bad SDP` | SRC sent no SDP part, or a non-SIPREC INVITE reached the listener |
+| BYE/re-INVITE answered 481 | In-dialog request from a different From-tag or source IP than the INVITE — the dialog check rejected it; the recording is untouched |
+| Recording ends early; log says `reaping idle session` | No BYE arrived and no RTP flowed for `SIPREC_SESSION_IDLE_SEC` — the reaper finalized it (check the SRC/network for the lost BYE) |
 | Recording has a WAV but it is silent/short | RTP never arrived: the SDP answer's `c=IN IP4` (`SIPREC_LOCAL_IP`) is not reachable from FreeSWITCH, or a firewall drops the UDP pool range |
 | Recording never starts over UDP, works over TCP | Multipart body over the path MTU — switch the SRC entry to `transport=tcp` |
 | Notify returns 401 | Wrong/missing secret (check Bearer value against `NOTIFY_SECRET`) |
 | Notify returns 503 | `NOTIFY_SECRET` is not set — the endpoint disables itself rather than run open |
 | Notify returns 400 `no correlation key` | The poster sent none of `CallSid`, `SipCallId`, `FsUuid` — add one (see correlation above) |
-| AMD shows as its own row, never merges | The recording carries no `cb-callsid` and notifications carry no `SipCallId`/`FsUuid` — nothing links them; add a key on either side |
+| AMD shows as its own row, never merges | The recording carries no `vm-callsid` and notifications carry no `SipCallId`/`FsUuid` — nothing links them; add a key on either side |
 | Sign-in ends at “not authorized” | The Google email is neither `ADMIN_EMAIL` nor in the Users list — an administrator must add it |
 | Everyone is signed out after restart | `SESSION_SECRET` unset (ephemeral) — set a stable value |
 | Call shows ⚠ write error; audio stops mid-call | Disk full (or `RECORDING_DIR` unwritable) during recording — the first failed write's error is on the call page; free space and the next call records cleanly |
@@ -552,5 +631,5 @@ Proudly supported by:
 This project is licensed under the MIT License - see the [LICENSE](LICENSE)
 file for details.
 
-The SRS core derives from callBroadcast's SIPREC receiver
+The SRS core derives from VoiceML's SIPREC receiver
 (`internal/siprecsrv` and friends), also by VoiceTel Communications.
