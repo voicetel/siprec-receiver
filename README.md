@@ -193,6 +193,15 @@ parameters, e.g. mod_siprec's per-call ad-hoc form:
 | `vm-callsid` | `call_sid` | Lets AMD notifications (keyed by CallSid) merge with this recording automatically |
 | `vm-account` | `account_sid` | Tenant/account attribution, shown in the UI |
 
+The aliases `callsid` and `accountsid` are also accepted; the `vm-*`
+parameters take precedence. With no explicit CallSid, the receiver
+derives `CA` plus the 32 hex identity digits from mod_siprec's metadata
+`session_id`. This matches VoiceML inbound calls and outbound calls on
+a mod_siprec build supporting CallSid channel identifiers. A static
+VoiceML connector should carry only the account parameter, never a
+fixed CallSid. Ordinary CallSid-only AMD/status webhooks then correlate
+without needing the recording dialog's SIP Call-ID.
+
 ## Wire behavior
 
 - **INVITE:** the body must contain an SDP part; an RS-Metadata part is

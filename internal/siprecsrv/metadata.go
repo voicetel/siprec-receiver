@@ -174,6 +174,16 @@ func (r *Recording) FsUUID() (string, bool) {
 	return b.String(), true
 }
 
+// CallSid reconstructs VoiceML's CallSid from mod_siprec's encoded
+// channel identity (inbound UUID or outbound CA-prefixed hex identity).
+func (r *Recording) CallSid() string {
+	if uuid, ok := r.FsUUID(); ok {
+		return "CA" + strings.ReplaceAll(uuid, "-", "")
+	}
+
+	return ""
+}
+
 // ParticipantAORs returns every participant's nameID AOR, in document
 // order — for mod_siprec exactly [caller, callee].
 func (r *Recording) ParticipantAORs() []string {

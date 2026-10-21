@@ -717,10 +717,13 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	// per-call ad-hoc `siprec <handle> sip:srs@host:5070;vm-callsid=CA…`,
 	// or an OpenSIPS recording-config lookup's ;vm-account=…).
 	accountSid, _ := req.Recipient.UriParams.Get("vm-account")
+	if accountSid == "" {
+		accountSid, _ = req.Recipient.UriParams.Get("accountsid")
+	}
 
 	callSid, _ := req.Recipient.UriParams.Get("vm-callsid")
 	if callSid == "" {
-		callSid, _ = req.Recipient.UriParams.Get("vm-callsid")
+		callSid, _ = req.Recipient.UriParams.Get("callsid")
 	}
 
 	fromURI := ""
@@ -759,6 +762,9 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 			callID, metaErr)
 
 		rec = &Recording{}
+	}
+	if callSid == "" {
+		callSid = rec.CallSid()
 	}
 
 	sh.mu.Lock()
