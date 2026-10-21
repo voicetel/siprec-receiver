@@ -1,4 +1,4 @@
-// Package cbclient fetches Call records from a callBroadcast
+// Package voiceml fetches Call records from a VoiceML
 // deployment's Twilio-compatible REST API, on request, so a stored
 // SIPREC recording can be enriched with the full calling record
 // (final status, billable duration, price, answered_by, …).
@@ -6,9 +6,9 @@
 // The fetch is GET /2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json
 // with HTTP Basic auth (AccountSid as username, the account's API key
 // as password) — exactly how Twilio SDKs authenticate. Keys are
-// per-account and come from the store (internal/store CBAccount);
+// per-account and come from the store (internal/store VoiceMLAccount);
 // this package only knows how to make the call.
-package cbclient
+package voiceml
 
 import (
 	"context"
@@ -24,7 +24,7 @@ import (
 	"github.com/voicetel/siprec-receiver/internal/store"
 )
 
-// Client fetches from one callBroadcast base URL.
+// Client fetches from one VoiceML base URL.
 type Client struct {
 	BaseURL string // e.g. https://cb.example.com (no trailing slash)
 	HTTP    *http.Client
@@ -39,15 +39,15 @@ func New(baseURL string) *Client {
 }
 
 // ErrNotConfigured reports a missing base URL or credential.
-var ErrNotConfigured = errors.New("callBroadcast fetch is not configured")
+var ErrNotConfigured = errors.New("VoiceML fetch is not configured")
 
-// StatusError is a non-200 from callBroadcast. The body is
-// deliberately not carried: callBroadcast error text can echo the
+// StatusError is a non-200 from VoiceML. The body is
+// deliberately not carried: VoiceML error text can echo the
 // request path, including the AccountSid.
 type StatusError struct{ Code int }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("callBroadcast answered HTTP %d", e.Code)
+	return fmt.Sprintf("VoiceML answered HTTP %d", e.Code)
 }
 
 // callJSON is the subset of the Twilio-shaped Call resource we
@@ -68,9 +68,9 @@ type callJSON struct {
 // FetchCall GETs one Call record. It returns the denormalized subset
 // plus the record pretty-printed for storage/display. apiKey is used
 // only for the Authorization header and never logged or returned.
-func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid string) (store.CBRecord, string, error) {
+func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid string) (store.VoiceMLRecord, string, error) {
 	if c.BaseURL == "" || accountSid == "" || apiKey == "" || callSid == "" {
-		return store.CBRecord{}, "", ErrNotConfigured
+		return store.VoiceMLRecord{}, "", ErrNotConfigured
 	}
 
 	url := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls/%s.json",
@@ -78,7 +78,7 @@ func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid stri
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return store.CBRecord{}, "", fmt.Errorf("cbclient: build request: %w", err)
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: build request: %w", err)
 	}
 
 	req.SetBasicAuth(accountSid, apiKey)
@@ -86,28 +86,28 @@ func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid stri
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return store.CBRecord{}, "", fmt.Errorf("cbclient: fetch call %s: %w", callSid, err)
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: fetch call %s: %w", callSid, err)
 	}
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return store.CBRecord{}, "", fmt.Errorf("cbclient: read response: %w", err)
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return store.CBRecord{}, "", &StatusError{Code: resp.StatusCode}
+		return store.VoiceMLRecord{}, "", &StatusError{Code: resp.StatusCode}
 	}
 
 	var raw map[string]any
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return store.CBRecord{}, "", fmt.Errorf("cbclient: decode response: %w", err)
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: decode response: %w", err)
 	}
 
 	var parsed callJSON
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return store.CBRecord{}, "", fmt.Errorf("cbclient: decode call: %w", err)
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: decode call: %w", err)
 	}
 
 	pretty, err := json.MarshalIndent(raw, "", "  ")
@@ -115,7 +115,7 @@ func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid stri
 		pretty = body
 	}
 
-	rec := store.CBRecord{
+	rec := store.VoiceMLRecord{
 		Sid:         parsed.Sid,
 		AccountSid:  parsed.AccountSid,
 		From:        parsed.From,

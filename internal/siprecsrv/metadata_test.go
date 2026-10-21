@@ -141,30 +141,6 @@ func TestSanitiseLabel_Truncates(t *testing.T) {
 	}
 }
 
-func TestBuildMetadataResponse_IncludesSessionAndState(t *testing.T) {
-	rec, _ := ParseMetadata(fsMetadataSample)
-	resp := BuildMetadataResponse(rec, "active")
-
-	for _, want := range []string{
-		`<recording xmlns="urn:ietf:params:xml:ns:recording:1">`,
-		`<session session_id="1234abcd">`,
-		`<recordingstate>active</recordingstate>`,
-		`<start-time>2026-05-05T12:00:00Z</start-time>`,
-	} {
-		if !strings.Contains(resp, want) {
-			t.Errorf("response missing %q\nresp:\n%s", want, resp)
-		}
-	}
-}
-
-func TestBuildMetadataResponse_EmptyMetadata_StillValid(t *testing.T) {
-	resp := BuildMetadataResponse(&Recording{}, "active")
-
-	if !strings.Contains(resp, `<recording xmlns=`) {
-		t.Errorf("response missing root element:\n%s", resp)
-	}
-}
-
 func BenchmarkParseMetadata(b *testing.B) {
 	body := fsMetadataSample
 

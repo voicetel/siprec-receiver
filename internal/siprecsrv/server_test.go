@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -91,7 +90,7 @@ func TestServer_SIPRECInvite_ProducesNamedWAVsAndFinalizes(t *testing.T) {
 		UriParams: sip.NewParams(),
 	}
 	target.UriParams.Add("transport", "tcp")
-	target.UriParams.Add("cb-account", acctSid)
+	target.UriParams.Add("vm-account", acctSid)
 
 	req := sip.NewRequest(sip.INVITE, target)
 	req.SetBody(body.body)
@@ -125,15 +124,16 @@ func TestServer_SIPRECInvite_ProducesNamedWAVsAndFinalizes(t *testing.T) {
 	// Give the server a beat to write WAV headers.
 	time.Sleep(100 * time.Millisecond)
 
-	expected := []string{"12165285911", "12085179911"}
-	for _, want := range expected {
-		matches, _ := filepath.Glob(filepath.Join(dir, "*"+want+".wav"))
-		if len(matches) == 0 {
-			t.Errorf("expected WAV containing %q in %s", want, dir)
-			entries, _ := os.ReadDir(dir)
-			for _, e := range entries {
-				t.Logf("  found: %s", e.Name())
-			}
+	// Filenames are server-generated now; the session snapshot is
+	// the source of truth for which files belong to this call.
+	snap := srv.SessionsSnapshot()
+	if len(snap) != 1 || len(snap[0].WAVFiles) != 2 {
+		t.Fatalf("snapshot = %+v, want 1 session with 2 WAVs", snap)
+	}
+
+	for _, path := range snap[0].WAVFiles {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("snapshot WAV %s: %v", path, err)
 		}
 	}
 

@@ -24,7 +24,12 @@ and must be listed below.</p>
       <td>{{fmtTime .CreatedAt}}</td>
       <td>{{if .Disabled}}disabled{{else}}active{{end}}</td>
       <td>
-        <form method="post" action="/admin/users/delete"
+        <form method="post" action="/admin/users/revoke" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="email" value="{{.Email}}">
+          <button type="submit" title="Sign this user out everywhere">Revoke sessions</button>
+        </form>
+        <form method="post" action="/admin/users/delete" style="display:inline"
           onsubmit="return confirm('Remove {{.Email}}?')">
           <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="email" value="{{.Email}}">

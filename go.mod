@@ -2,15 +2,17 @@ module github.com/voicetel/siprec-receiver
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/emiago/sipgo v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	golang.org/x/oauth2 v0.37.0
-	google.golang.org/api v0.307.0
+	google.golang.org/api v0.299.0
 )
 
 require (
-	cloud.google.com/go/auth v0.24.1-0.20261001053825-dbc26066f70a // indirect
+	cloud.google.com/go/auth v0.23.3 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.3.0 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

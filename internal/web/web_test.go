@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -36,10 +37,10 @@ type fixture struct {
 func newFixture(t *testing.T, devEmail string) *fixture {
 	t.Helper()
 
-	return newFixtureCB(t, devEmail, "")
+	return newFixtureVM(t, devEmail, "")
 }
 
-func newFixtureCB(t *testing.T, devEmail, cbBaseURL string) *fixture {
+func newFixtureVM(t *testing.T, devEmail, voicemlBaseURL string) *fixture {
 	t.Helper()
 
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -57,7 +58,7 @@ func newFixtureCB(t *testing.T, devEmail, cbBaseURL string) *fixture {
 
 	recDir := t.TempDir()
 
-	ws, err := New(st, authn, recDir, secret, cbBaseURL)
+	ws, err := New(st, authn, recDir, secret, voicemlBaseURL)
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
 	}
@@ -89,6 +90,34 @@ func (f *fixture) loginClient(t *testing.T) *http.Client {
 
 	return c
 }
+
+// csrfFromPage GETs a page with the client and extracts the CSRF
+// token a browser would submit from its first form.
+func csrfFromPage(t *testing.T, c *http.Client, url string) string {
+	t.Helper()
+
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	b, _ := io.ReadAll(resp.Body)
+
+	m := csrfRe.FindSubmatch(b)
+	if m == nil {
+		t.Fatalf("no csrf token on %s (status %d)", url, resp.StatusCode)
+	}
+
+	if m[1] != nil {
+		return string(m[1])
+	}
+
+	return string(m[2])
+}
+
+var csrfRe = regexp.MustCompile(`name="csrf-token" content="([^"]+)"|name="csrf_token" value="([^"]+)"`)
 
 func (f *fixture) seedCall(t *testing.T) (callID int64, legID int64) {
 	t.Helper()
@@ -258,7 +287,7 @@ func TestUI_AdminAndUserRoles(t *testing.T) {
 	form := url.Values{
 		"email":      {userEmail},
 		"role":       {"user"},
-		"csrf_token": {f.auth.CSRFToken(adminEmail)},
+		"csrf_token": {csrfFromPage(t, admin, f.srv.URL+"/admin/users")},
 	}
 
 	resp2, err := admin.PostForm(f.srv.URL+"/admin/users", form)
@@ -339,7 +368,8 @@ func TestUI_AdminAndUserRoles(t *testing.T) {
 	}
 
 	// User cannot delete.
-	delForm := url.Values{"csrf_token": {f.auth.CSRFToken(userEmail)}}
+	delForm := url.Values{"csrf_token": {csrfFromPage(t, userClient,
+		f.srv.URL+"/recordings/"+itoa(callID))}}
 	resp7, err := userClient.PostForm(
 		f.srv.URL+"/recordings/"+itoa(callID)+"/delete", delForm)
 	if err != nil {

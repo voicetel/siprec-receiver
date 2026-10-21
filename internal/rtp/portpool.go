@@ -46,7 +46,11 @@ func NewPortPool(lo, hi int) *PortPool {
 	return p
 }
 
-// Acquire returns a free port, or an error if the pool is exhausted.
+// Acquire returns the oldest free port, or an error if the pool is
+// exhausted. Ports are handed out first-in, first-out and Release
+// appends to the back, so a just-released port is reused only after
+// every other free port — a delay that keeps a previous call's late
+// teardown RTP out of the next call's recording.
 func (p *PortPool) Acquire() (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -55,8 +59,8 @@ func (p *PortPool) Acquire() (int, error) {
 		return 0, fmt.Errorf("rtp port pool exhausted (%d-%d)", p.lo, p.hi)
 	}
 
-	port := p.free[len(p.free)-1]
-	p.free = p.free[:len(p.free)-1]
+	port := p.free[0]
+	p.free = p.free[1:]
 	p.inUse[port] = struct{}{}
 
 	return port, nil
@@ -75,9 +79,10 @@ func (p *PortPool) Release(port int) {
 	p.free = append(p.free, port)
 }
 
-// Demote returns an acquired port to the bottom of the free list, so every
-// other free port is handed out before this one again. Used when a port is
-// found to be held by another process (#94).
+// Demote returns an acquired port to the BACK of the free list, so
+// every other free port is handed out before this one again. Used
+// when a port is found to be held by another process. With FIFO
+// acquisition, appending is the back.
 func (p *PortPool) Demote(port int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -87,13 +92,13 @@ func (p *PortPool) Demote(port int) {
 	}
 
 	delete(p.inUse, port)
-	p.free = append([]int{port}, p.free...)
+	p.free = append(p.free, port)
 }
 
 // AcquireBound acquires a port and passes it to bind, which typically opens
 // the port's socket. When bind fails, for example because another process
-// already holds the port, the port is demoted, cb_rtp_port_bind_failures_total
-// is incremented and the next port is tried, up to MaxBindAttempts. An empty
+// already holds the port, the port is demoted to the back of the queue
+// and the next port is tried, up to MaxBindAttempts. An empty
 // pool is reported as Acquire reports it; running out of attempts wraps
 // ErrNoBindablePort with the last bind error.
 func AcquireBound[T any](p *PortPool, bind func(port int) (T, error)) (int, T, error) {

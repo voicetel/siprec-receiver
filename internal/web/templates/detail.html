@@ -23,20 +23,20 @@
       SIP {{.Call.DispSipCode}}{{end}}{{if .Call.DispErrorCode}},
       error {{.Call.DispErrorCode}}{{if .Call.DispErrorMessage}} ({{.Call.DispErrorMessage}}){{end}}{{end}},
       notified {{fmtTime .Call.DispNotifiedAt}}{{else}}—{{end}}</dd>
-  <dt>callBroadcast record</dt>
-  <dd>{{if .Call.CBRecordJSON}}fetched {{fmtTime .Call.CBFetchedAt}}{{else}}not fetched{{end}}
+  <dt>VoiceML record</dt>
+  <dd>{{if .Call.VoiceMLRecordJSON}}fetched {{fmtTime .Call.VoiceMLFetchedAt}}{{else}}not fetched{{end}}
     {{if .Call.CallSid}}
     <form method="post" action="/recordings/{{.Call.ID}}/fetch-record" style="display:inline">
       <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-      <button type="submit">{{if .Call.CBRecordJSON}}Refresh from callBroadcast{{else}}Fetch full record from callBroadcast{{end}}</button>
+      <button type="submit">{{if .Call.VoiceMLRecordJSON}}Refresh from VoiceML{{else}}Fetch full record from VoiceML{{end}}</button>
     </form>
     {{end}}</dd>
 </dl>
 
-{{if .Call.CBRecordJSON}}
+{{if .Call.VoiceMLRecordJSON}}
 <details>
-  <summary>callBroadcast Call record (JSON)</summary>
-  <pre>{{.Call.CBRecordJSON}}</pre>
+  <summary>VoiceML Call record (JSON)</summary>
+  <pre>{{.Call.VoiceMLRecordJSON}}</pre>
 </details>
 {{end}}
 

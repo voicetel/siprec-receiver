@@ -168,7 +168,7 @@ func TestApplyAMD_BeforeRecordingMergesByCallSid(t *testing.T) {
 		t.Fatalf("ApplyAMD placeholder: id=%d matched=%v err=%v", amdID, matched, err)
 	}
 
-	// Recording arrives carrying the same CallSid via cb-callsid.
+	// Recording arrives carrying the same CallSid via vm-callsid.
 	rec, _ := modSiprecMetadata(t, "123e4567-e89b-12d3-a456-426614174001")
 	err = s.RecordLeg(ctx, siprecsrv.FinalizedLeg{
 		CallID: "dlg-3", CallSid: "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

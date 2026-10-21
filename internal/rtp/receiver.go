@@ -36,6 +36,13 @@ var (
 )
 
 // Receiver listens on a UDP port for RTP and delivers decoded PCM frames.
+//
+// The receiver locks onto the first (source address, SSRC) it sees and
+// drops everything else: an SRS leg has exactly one legitimate sender
+// (the SRC's fork socket), and accepting other senders would let anyone
+// who can reach the port inject audio into a recording. Packets are
+// ordered by RTP timestamp: sequence gaps become silence, late packets
+// are dropped.
 type Receiver struct {
 	conn            *net.UDPConn
 	callback        FrameCallback
@@ -45,16 +52,34 @@ type Receiver struct {
 	PacketsReceived int64
 	PacketsLost     int64
 	once            sync.Once
+	dropLogOnce     sync.Once
 	started         bool
 	lastSeq         uint16
 	seqInit         bool
+	lastTS          uint32
+	tsInit          bool
+	locked          bool
+	srcAddr         string
+	ssrc            uint32
 }
 
-// NewReceiver creates a receiver on the specified port.
+// NewReceiver creates a receiver bound to all IPv4 interfaces.
 func NewReceiver(port int, callback FrameCallback) (*Receiver, error) {
-	addr := &net.UDPAddr{Port: port, IP: net.IPv4zero}
+	return NewReceiverIP("", port, callback)
+}
 
-	conn, err := net.ListenUDP("udp4", addr)
+// NewReceiverIP creates a receiver bound to bindIP ("" or an
+// unparseable value means all interfaces). Binding to the address the
+// SDP answer advertises keeps the RTP surface off other interfaces.
+func NewReceiverIP(bindIP string, port int, callback FrameCallback) (*Receiver, error) {
+	ip := net.IPv4zero
+	if bindIP != "" {
+		if parsed := net.ParseIP(bindIP); parsed != nil && parsed.To4() != nil {
+			ip = parsed.To4()
+		}
+	}
+
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port, IP: ip})
 	if err != nil {
 		return nil, fmt.Errorf("rtp listen on port %d: %w", port, err)
 	}
@@ -118,6 +143,14 @@ func (r *Receiver) Port() int {
 }
 
 func (r *Receiver) loop() {
+	// A panic in the loop must not take the whole process (and every
+	// other active recording) down with it.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[rtp] receiver port %d: panic recovered: %v", r.port, rec)
+		}
+	}()
+
 	buf := make([]byte, maxRTPPacket)
 	// Reusable PCM scratch — sized to hold the largest plausible RTP
 	// payload (an MTU-bounded 1500-byte packet of single-byte G.711
@@ -138,7 +171,7 @@ func (r *Receiver) loop() {
 			return
 		}
 
-		n, _, err := connReadFromUDP(r.conn, buf)
+		n, addr, err := connReadFromUDP(r.conn, buf)
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
@@ -166,17 +199,70 @@ func (r *Receiver) loop() {
 			continue
 		}
 
-		// Track sequence numbers for loss detection
+		// Strip RTP padding: the last byte counts the padding bytes,
+		// which are not audio.
+		if header.Padding && len(payload) > 0 {
+			pad := int(payload[len(payload)-1])
+			if pad > 0 && pad <= len(payload) {
+				payload = payload[:len(payload)-pad]
+			}
+
+			if len(payload) == 0 {
+				continue
+			}
+		}
+
+		// Lock onto the first sender (address + SSRC); drop the rest.
+		src := ""
+		if addr != nil {
+			src = addr.String()
+		}
+
+		if !r.locked {
+			r.locked, r.srcAddr, r.ssrc = true, src, header.SSRC
+		} else if src != r.srcAddr || header.SSRC != r.ssrc {
+			r.dropLogOnce.Do(func() {
+				log.Printf("[rtp] port %d: dropping RTP from unexpected source %s ssrc=%d (locked to %s ssrc=%d)",
+					r.port, src, header.SSRC, r.srcAddr, r.ssrc)
+			})
+
+			continue
+		}
+
+		// Sequence ordering: a signed difference keeps wrap and
+		// reordering sane. Late/duplicate packets are dropped, gaps
+		// count as loss.
 		if r.seqInit {
-			expected := r.lastSeq + 1
-			if header.SequenceNumber != expected {
-				gap := int64(header.SequenceNumber - expected)
-				r.PacketsLost += gap
+			diff := int16(header.SequenceNumber - (r.lastSeq + 1))
+			if diff < 0 {
+				continue
+			}
+
+			if diff > 0 {
+				r.PacketsLost += int64(diff)
 			}
 		}
 
 		r.lastSeq = header.SequenceNumber
 		r.seqInit = true
+
+		// Timestamp ordering: fill gaps with silence so the
+		// recording keeps wall-clock duration (and legs stay in
+		// sync); drop packets whose media we have already passed.
+		// lastTS is the next expected timestamp, so the signed
+		// delta is exactly the number of missing samples.
+		if r.tsInit && r.callback != nil {
+			missing := int64(int32(header.Timestamp - r.lastTS))
+
+			switch {
+			case missing > 0:
+				if missing <= 16000 {
+					r.callback(make([]int16, missing))
+				}
+			case missing < 0:
+				continue
+			}
+		}
 
 		// Decode G.711 into the receiver-owned PCM scratch buffer.
 		var nSamples int
@@ -194,6 +280,9 @@ func (r *Receiver) loop() {
 		if r.callback != nil && nSamples > 0 {
 			r.callback(pcm[:nSamples])
 		}
+
+		r.lastTS = header.Timestamp + uint32(len(payload))
+		r.tsInit = true
 	}
 }
 
@@ -279,15 +368,6 @@ func init() {
 	}
 }
 
-func decodePCMU(data []byte) []int16 {
-	out := make([]int16, len(data))
-	for i, b := range data {
-		out[i] = pcmuTable[b]
-	}
-
-	return out
-}
-
 // decodePCMUInto decodes μ-law into a caller-provided buffer and returns
 // the number of samples written. The buffer must hold at least len(data)
 // elements. Used by the RTP receiver to avoid per-packet allocation.
@@ -335,15 +415,6 @@ func init() {
 
 		pcmaTable[i] = sample
 	}
-}
-
-func decodePCMA(data []byte) []int16 {
-	out := make([]int16, len(data))
-	for i, b := range data {
-		out[i] = pcmaTable[b]
-	}
-
-	return out
 }
 
 // decodePCMAInto decodes A-law into a caller-provided buffer and returns

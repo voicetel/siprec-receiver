@@ -15,7 +15,7 @@ import (
 )
 
 // seedCallWithIDs records a call carrying the correlation IDs the
-// disposition endpoint and the callBroadcast fetch key on.
+// disposition endpoint and the VoiceML fetch key on.
 func seedCallWithIDs(t *testing.T, f *fixture) int64 {
 	t.Helper()
 
@@ -102,7 +102,7 @@ func TestNotifyDisposition_FormAuthAndMerge(t *testing.T) {
 }
 
 func TestFetchRecord_EndToEnd(t *testing.T) {
-	// Fake callBroadcast: serves one Call record, checks Basic auth.
+	// Fake VoiceML: serves one Call record, checks Basic auth.
 	cb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
 		if !ok || user != "ACtest" || pass != "key123" {
@@ -125,7 +125,7 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 	}))
 	defer cb.Close()
 
-	f := newFixtureCB(t, adminEmail, cb.URL)
+	f := newFixtureVM(t, adminEmail, cb.URL)
 	callID := seedCallWithIDs(t, f)
 	admin := f.loginClient(t)
 
@@ -147,13 +147,13 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 
 	// No key configured yet: fetch redirects with an explanation.
 	resp := post("/recordings/"+itoa(callID)+"/fetch-record", url.Values{
-		"csrf_token": {f.auth.CSRFToken(adminEmail)},
+		"csrf_token": {csrfFromPage(t, admin, f.srv.URL+"/recordings/"+itoa(callID))},
 	})
 	loc := resp.Header.Get("Location")
 	_ = resp.Body.Close()
 
-	if !strings.Contains(loc, "No+callBroadcast+API+key") &&
-		!strings.Contains(loc, "No%20callBroadcast%20API%20key") {
+	if !strings.Contains(loc, "No+VoiceML+API+key") &&
+		!strings.Contains(loc, "No%20VoiceML%20API%20key") {
 		t.Fatalf("fetch without key redirected to %q", loc)
 	}
 
@@ -161,7 +161,7 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 	resp2 := post("/admin/integrations", url.Values{
 		"account_sid": {"ACtest"},
 		"api_key":     {"key123"},
-		"csrf_token":  {f.auth.CSRFToken(adminEmail)},
+		"csrf_token":  {csrfFromPage(t, admin, f.srv.URL+"/admin/integrations")},
 	})
 	_ = resp2.Body.Close()
 
@@ -184,13 +184,13 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 
 	// Now the fetch succeeds and the record lands on the call.
 	resp3 := post("/recordings/"+itoa(callID)+"/fetch-record", url.Values{
-		"csrf_token": {f.auth.CSRFToken(adminEmail)},
+		"csrf_token": {csrfFromPage(t, admin, f.srv.URL+"/recordings/"+itoa(callID))},
 	})
 	_ = resp3.Body.Close()
 
 	call, _ := f.store.GetCall(context.Background(), callID)
-	if call.CBRecordJSON == "" || !strings.Contains(call.CBRecordJSON, `"answered_by"`) {
-		t.Fatalf("cb record not stored: %q", call.CBRecordJSON)
+	if call.VoiceMLRecordJSON == "" || !strings.Contains(call.VoiceMLRecordJSON, `"answered_by"`) {
+		t.Fatalf("cb record not stored: %q", call.VoiceMLRecordJSON)
 	}
 
 	if call.DispStatus != "completed" || call.AMDAnsweredBy != "human" {

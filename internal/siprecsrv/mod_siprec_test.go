@@ -153,7 +153,7 @@ func TestServer_ModSiprecPauseResumeKeepsOneRecording(t *testing.T) {
 
 	target := sip.Uri{User: "srs", Host: "127.0.0.1", Port: port, UriParams: sip.NewParams()}
 	target.UriParams.Add("transport", "tcp")
-	target.UriParams.Add("cb-callsid", "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	target.UriParams.Add("vm-callsid", "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
 	send := func(method sip.RequestMethod, cseq int, body []byte, ct string) int {
 		req := sip.NewRequest(method, target)

@@ -16,29 +16,31 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/voicetel/siprec-receiver/internal/auth"
-	"github.com/voicetel/siprec-receiver/internal/cbclient"
 	"github.com/voicetel/siprec-receiver/internal/store"
+	"github.com/voicetel/siprec-receiver/internal/voiceml"
 )
 
 // Server bundles the HTTP handlers' dependencies.
 type Server struct {
-	Store        *store.Store
-	Auth         *auth.Authenticator
-	RecordingDir string
-	NotifySecret string
-	CBBaseURL    string // callBroadcast base URL for on-request record fetches; "" disables
+	Store          *store.Store
+	Auth           *auth.Authenticator
+	RecordingDir   string
+	NotifySecret   string
+	VoiceMLBaseURL string // VoiceML base URL for on-request record fetches; "" disables
 
-	tmpl *template.Template
+	secretQueryWarn sync.Once
+	tmpl            *template.Template
 }
 
 //go:embed templates/*.html
 var templatesFS embed.FS
 
 // amdDispositions is the filter vocabulary for the recordings list —
-// callBroadcast's internal AMD verdict set (Twilio's strict wire set
+// VoiceML's internal AMD verdict set (Twilio's strict wire set
 // plus the extended screened/disconnected values).
 var amdDispositions = []string{
 	"human", "machine_start", "machine_end_beep", "machine_end_silence",
@@ -47,7 +49,7 @@ var amdDispositions = []string{
 }
 
 // New builds a Server and parses the embedded templates.
-func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, cbBaseURL string) (*Server, error) {
+func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, voicemlBaseURL string) (*Server, error) {
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -71,12 +73,12 @@ func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, cbB
 	}
 
 	return &Server{
-		Store:        st,
-		Auth:         a,
-		RecordingDir: recordingDir,
-		NotifySecret: notifySecret,
-		CBBaseURL:    strings.TrimRight(strings.TrimSpace(cbBaseURL), "/"),
-		tmpl:         tmpl,
+		Store:          st,
+		Auth:           a,
+		RecordingDir:   recordingDir,
+		NotifySecret:   notifySecret,
+		VoiceMLBaseURL: strings.TrimRight(strings.TrimSpace(voicemlBaseURL), "/"),
+		tmpl:           tmpl,
 	}, nil
 }
 
@@ -95,9 +97,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.Handle("GET /auth/login", http.HandlerFunc(s.Auth.HandleLogin))
 	mux.Handle("GET /auth/callback", http.HandlerFunc(s.Auth.HandleCallback))
-	mux.Handle("GET /auth/logout", http.HandlerFunc(s.Auth.HandleLogout))
 
 	authed := http.NewServeMux()
+	authed.Handle("POST /auth/logout", http.HandlerFunc(s.Auth.HandleLogout))
 	authed.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/recordings", http.StatusSeeOther)
 	})
@@ -113,6 +115,10 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserUpsert)))
 	authed.Handle("POST /admin/users/delete",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserDelete)))
+	authed.Handle("POST /admin/users/revoke",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserRevoke)))
+	authed.Handle("GET /admin/audit",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleAudit)))
 	authed.Handle("GET /admin/integrations",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrations)))
 	authed.Handle("POST /admin/integrations",
@@ -122,7 +128,24 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/", s.Auth.RequireAuth(authed))
 
-	return mux
+	return securityHeaders(mux)
+}
+
+// securityHeaders adds the baseline hardening headers to every
+// response: no framing (the pages carry destructive admin actions),
+// no MIME sniffing, same-origin referrers, and a CSP that only
+// allows our own pages, styles, and audio.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy",
+			"frame-ancestors 'none'; default-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self'; img-src 'self' data:")
+		h.Set("Referrer-Policy", "same-origin")
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 type baseData struct {
@@ -136,7 +159,7 @@ func (s *Server) base(r *http.Request) baseData {
 
 	d := baseData{User: u, Msg: r.URL.Query().Get("msg")}
 	if u != nil {
-		d.CSRF = s.Auth.CSRFToken(u.Email)
+		d.CSRF = s.Auth.CSRFToken(u.Email, u.Exp)
 	}
 
 	return d
@@ -320,9 +343,22 @@ func (s *Server) safeWAVPath(p string) (string, error) {
 	return abs, nil
 }
 
+// audit records an administrative action. Failures are logged, not
+// fatal: the audit trail must never block the action it describes.
+func (s *Server) audit(r *http.Request, action, target, detail string) {
+	actor := ""
+	if u := auth.CurrentUser(r); u != nil {
+		actor = u.Email
+	}
+
+	if err := s.Store.Audit(r.Context(), actor, action, target, detail); err != nil {
+		log.Printf("[web] audit %s %s: %v", action, target, err)
+	}
+}
+
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -350,18 +386,20 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[web] admin %s deleted call %d (%d file(s))", user.Email, id, len(paths))
+	s.audit(r, "recording.delete", strconv.FormatInt(id, 10),
+		fmt.Sprintf("%d file(s) removed", len(paths)))
 	http.Redirect(w, r, "/recordings?msg=Recording+deleted", http.StatusSeeOther)
 }
 
 // handleFetchRecord pulls the full Call record for this call from
-// callBroadcast, on request, using the per-account API key an
+// VoiceML, on request, using the per-account API key an
 // administrator configured under Integrations. Any signed-in user may
-// refresh: the fetch only reads callBroadcast and stores what it
+// refresh: the fetch only reads VoiceML and stores what it
 // answered. Errors are reported as page messages, never as raw
 // upstream bodies (which can echo account SIDs).
 func (s *Server) handleFetchRecord(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -396,48 +434,50 @@ func (s *Server) handleFetchRecord(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case call.CallSid == "":
 		fail("This call has no CallSid, so there is nothing to fetch. " +
-			"Stamp cb-callsid on the SRS URI (or notify it) to link the call.")
+			"Stamp vm-callsid on the SRS URI (or notify it) to link the call.")
 		return
 	case call.AccountSid == "":
 		fail("This call has no AccountSid, so the account's API key can't be selected.")
 		return
-	case s.CBBaseURL == "":
-		fail("CALLBROADCAST_BASE_URL is not configured on this server.")
+	case s.VoiceMLBaseURL == "":
+		fail("VOICEML_BASE_URL is not configured on this server.")
 		return
 	}
 
-	acct, err := s.Store.GetCBAccount(r.Context(), call.AccountSid)
+	acct, err := s.Store.GetVoiceMLAccount(r.Context(), call.AccountSid)
 	if err != nil {
 		log.Printf("[web] fetch-record: key lookup %s: %v", call.AccountSid, err)
-		http.Error(w, "failed to look up callBroadcast credentials", http.StatusInternalServerError)
+		http.Error(w, "failed to look up VoiceML credentials", http.StatusInternalServerError)
 
 		return
 	}
 
 	if acct == nil || acct.APIKey == "" {
-		fail("No callBroadcast API key is configured for account " + call.AccountSid +
+		fail("No VoiceML API key is configured for account " + call.AccountSid +
 			". An administrator can add one under Integrations.")
 		return
 	}
 
-	rec, pretty, err := cbclient.New(s.CBBaseURL).FetchCall(
+	rec, pretty, err := voiceml.New(s.VoiceMLBaseURL).FetchCall(
 		r.Context(), call.AccountSid, acct.APIKey, call.CallSid)
 	if err != nil {
 		log.Printf("[web] fetch-record call %d (CallSid %s): %v", id, call.CallSid, err)
-		fail("Fetching the call record from callBroadcast failed (" + err.Error() + ").")
+		fail("Fetching the call record from VoiceML failed (" + err.Error() + ").")
 		return
 	}
 
-	if err := s.Store.SaveCBRecord(r.Context(), id, rec, pretty); err != nil {
+	if err := s.Store.SaveVoiceMLRecord(r.Context(), id, rec, pretty); err != nil {
 		log.Printf("[web] fetch-record: save %d: %v", id, err)
 		http.Error(w, "failed to store the fetched record", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] %s fetched callBroadcast record for call %d (CallSid %s, status %s)",
+	log.Printf("[web] %s fetched VoiceML record for call %d (CallSid %s, status %s)",
 		user.Email, id, call.CallSid, rec.Status)
-	fail("Call record fetched from callBroadcast.")
+	s.audit(r, "record.fetch", strconv.FormatInt(id, 10),
+		"CallSid "+call.CallSid+" status "+rec.Status)
+	fail("Call record fetched from VoiceML.")
 }
 
 // --- Admin: users -----------------------------------------------------------
@@ -466,7 +506,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUserUpsert(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -499,12 +539,13 @@ func (s *Server) handleUserUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[web] admin %s saved user %s role=%s", user.Email, email, role)
+	s.audit(r, "user.upsert", email, "role="+role)
 	http.Redirect(w, r, "/admin/users?msg=User+saved", http.StatusSeeOther)
 }
 
 func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -525,19 +566,61 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[web] admin %s deleted user %s", user.Email, email)
+	s.audit(r, "user.delete", email, "")
 	http.Redirect(w, r, "/admin/users?msg=User+deleted", http.StatusSeeOther)
 }
 
-// --- Admin: callBroadcast integrations --------------------------------------
+func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	email := store.NormalizeEmail(r.FormValue("email"))
+
+	if err := s.Store.BumpSessionEpoch(r.Context(), email); err != nil {
+		log.Printf("[web] revoke sessions %s: %v", email, err)
+		http.Error(w, "failed to revoke sessions", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] admin %s revoked sessions for %s", user.Email, email)
+	s.audit(r, "user.revoke_sessions", email, "")
+	http.Redirect(w, r, "/admin/users?msg=Sessions+revoked", http.StatusSeeOther)
+}
+
+// --- Admin: audit log ---------------------------------------------------------
+
+type auditData struct {
+	baseData
+	Entries []store.AuditEntry
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.Store.ListAudit(r.Context(), 200)
+	if err != nil {
+		log.Printf("[web] list audit: %v", err)
+		http.Error(w, "failed to load audit log", http.StatusInternalServerError)
+
+		return
+	}
+
+	s.render(w, "audit.html", auditData{baseData: s.base(r), Entries: entries})
+}
+
+// --- Admin: VoiceML integrations --------------------------------------
 
 type integrationsData struct {
 	baseData
-	Accounts  []store.CBAccount
-	CBBaseURL string
+	Accounts       []store.VoiceMLAccount
+	VoiceMLBaseURL string
 }
 
 func (s *Server) handleIntegrations(w http.ResponseWriter, r *http.Request) {
-	accounts, err := s.Store.ListCBAccounts(r.Context())
+	accounts, err := s.Store.ListVoiceMLAccounts(r.Context())
 	if err != nil {
 		log.Printf("[web] list cb accounts: %v", err)
 		http.Error(w, "failed to list integrations", http.StatusInternalServerError)
@@ -546,15 +629,15 @@ func (s *Server) handleIntegrations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.render(w, "integrations.html", integrationsData{
-		baseData:  s.base(r),
-		Accounts:  accounts,
-		CBBaseURL: s.CBBaseURL,
+		baseData:       s.base(r),
+		Accounts:       accounts,
+		VoiceMLBaseURL: s.VoiceMLBaseURL,
 	})
 }
 
 func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -569,7 +652,7 @@ func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	err := s.Store.UpsertCBAccount(r.Context(), store.CBAccount{
+	err := s.Store.UpsertVoiceMLAccount(r.Context(), store.VoiceMLAccount{
 		AccountSid: accountSid,
 		APIKey:     apiKey,
 		CreatedBy:  user.Email,
@@ -581,13 +664,14 @@ func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	log.Printf("[web] admin %s saved callBroadcast key for account %s", user.Email, accountSid)
-	http.Redirect(w, r, "/admin/integrations?msg=callBroadcast+key+saved", http.StatusSeeOther)
+	log.Printf("[web] admin %s saved VoiceML key for account %s", user.Email, accountSid)
+	s.audit(r, "voicemlkey.save", accountSid, "")
+	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+saved", http.StatusSeeOther)
 }
 
 func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request) {
 	user := auth.CurrentUser(r)
-	if !s.Auth.CheckCSRF(r, user.Email) {
+	if !s.Auth.CheckCSRF(r, user) {
 		http.Error(w, "invalid CSRF token", http.StatusForbidden)
 
 		return
@@ -595,13 +679,14 @@ func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request)
 
 	accountSid := strings.TrimSpace(r.FormValue("account_sid"))
 
-	if _, err := s.Store.DeleteCBAccount(r.Context(), accountSid); err != nil {
+	if _, err := s.Store.DeleteVoiceMLAccount(r.Context(), accountSid); err != nil {
 		log.Printf("[web] delete cb account %s: %v", accountSid, err)
 		http.Error(w, "failed to delete integration", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[web] admin %s deleted callBroadcast key for account %s", user.Email, accountSid)
-	http.Redirect(w, r, "/admin/integrations?msg=callBroadcast+key+deleted", http.StatusSeeOther)
+	log.Printf("[web] admin %s deleted VoiceML key for account %s", user.Email, accountSid)
+	s.audit(r, "voicemlkey.delete", accountSid, "")
+	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+deleted", http.StatusSeeOther)
 }

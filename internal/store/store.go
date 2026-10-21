@@ -6,7 +6,7 @@
 //
 //   - Recording-first: the SRS finalizes a SIPREC session (keyed by the
 //     SIPREC dialog's SIP Call-ID, optionally carrying a CallSid from
-//     the INVITE Request-URI's cb-callsid parameter and the FreeSWITCH
+//     the INVITE Request-URI's vm-callsid parameter and the FreeSWITCH
 //     parent-call UUID decoded from the RS-Metadata session_id).
 //   - AMD-first: the call-notification endpoint logs a disposition
 //     (keyed by CallSid, optionally carrying the SIP Call-ID or the
@@ -60,16 +60,16 @@ type Call struct {
 	DispErrorMessage string
 	DispNotifiedAt   time.Time
 	DispRaw          string
-	// Full call record fetched on request from callBroadcast.
-	CBRecordJSON  string
-	CBFetchedAt   time.Time
-	MetadataJSON  string
-	MetadataXML   string
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	LegCount      int
-	HasWriteError bool  // any leg carries a WAV write error
-	Legs          []Leg // populated by GetCall
+	// Full call record fetched on request from VoiceML.
+	VoiceMLRecordJSON string
+	VoiceMLFetchedAt  time.Time
+	MetadataJSON      string
+	MetadataXML       string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	LegCount          int
+	HasWriteError     bool  // any leg carries a WAV write error
+	Legs              []Leg // populated by GetCall
 }
 
 // Leg is one recorded audio stream of a call (one WAV file). mod_siprec
@@ -90,16 +90,18 @@ type Leg struct {
 // the ADMIN_EMAIL environment variable is not stored here; it always
 // has admin role (see internal/auth).
 type User struct {
-	Email     string
-	Role      string // "admin" or "user"
-	CreatedBy string
-	CreatedAt time.Time
-	Disabled  bool
+	Email        string
+	Role         string // "admin" or "user"
+	CreatedBy    string
+	CreatedAt    time.Time
+	Disabled     bool
+	GoogleSub    string // pinned Google account ID (sub claim); "" until first sign-in
+	SessionEpoch int    // bump to revoke every outstanding session
 }
 
 // AMDNotification is one call-notification (answering-machine
 // disposition) as accepted by the notify endpoint. Field names follow
-// callBroadcast's AMD webhook payload (internal/api AMDCallbackPayload:
+// VoiceML's AMD webhook payload (internal/api AMDCallbackPayload:
 // CallSid, AccountSid, AnsweredBy, MachineDetectionDuration, From, To,
 // CallStatus, Direction), plus the SIPREC correlation keys SipCallId
 // and FsUuid a poster that knows them can add.
@@ -150,7 +152,105 @@ func Open(path string) (*Store, error) {
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// migrateLegacyNames renames the pre-VoiceML-rename schema objects
+// (cb_accounts table, calls.cb_record_json / cb_fetched_at columns)
+// on databases created by earlier builds. Guarded everywhere, so it
+// is a no-op on fresh databases. Runs before the schema DDL.
+func (s *Store) migrateLegacyNames(ctx context.Context) error {
+	tableExists := func(name string) (bool, error) {
+		var n int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`,
+			name).Scan(&n)
+
+		return n > 0, err
+	}
+
+	cbTable, err := tableExists("cb_accounts")
+	if err != nil {
+		return fmt.Errorf("store: legacy table check: %w", err)
+	}
+
+	vmTable, err := tableExists("voiceml_accounts")
+	if err != nil {
+		return fmt.Errorf("store: legacy table check: %w", err)
+	}
+
+	switch {
+	case cbTable && !vmTable:
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE cb_accounts RENAME TO voiceml_accounts`); err != nil {
+			return fmt.Errorf("store: rename cb_accounts: %w", err)
+		}
+	case cbTable && vmTable:
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT OR IGNORE INTO voiceml_accounts SELECT * FROM cb_accounts;
+			 DROP TABLE cb_accounts;`); err != nil {
+			return fmt.Errorf("store: merge cb_accounts: %w", err)
+		}
+	}
+
+	for _, rename := range [][2]string{
+		{"cb_record_json", "voiceml_record_json"},
+		{"cb_fetched_at", "voiceml_fetched_at"},
+	} {
+		oldCol, newCol := rename[0], rename[1]
+
+		hasOld, err := s.columnExists(ctx, "calls", oldCol)
+		if err != nil || !hasOld {
+			continue
+		}
+
+		hasNew, err := s.columnExists(ctx, "calls", newCol)
+		if err != nil {
+			return err
+		}
+
+		if !hasNew {
+			if _, err := s.db.ExecContext(ctx,
+				`ALTER TABLE calls RENAME COLUMN `+oldCol+` TO `+newCol); err != nil {
+				return fmt.Errorf("store: rename column %s: %w", oldCol, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// columnExists reports whether table has column (PRAGMA table_info).
+func (s *Store) columnExists(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return false, fmt.Errorf("store: pragma %s: %w", table, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name, typ string
+			notNull   int
+			dflt, pk  any
+		)
+
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("store: pragma scan: %w", err)
+		}
+
+		if name == column {
+			return true, nil
+		}
+	}
+
+	return false, rows.Err()
+}
+
 func (s *Store) migrate(ctx context.Context) error {
+	if err := s.migrateLegacyNames(ctx); err != nil {
+		return err
+	}
+
 	const schema = `
 CREATE TABLE IF NOT EXISTS calls (
 	id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,19 +291,30 @@ CREATE TABLE IF NOT EXISTS legs (
 	UNIQUE(call_id, wav_path)
 );
 CREATE TABLE IF NOT EXISTS users (
-	email      TEXT PRIMARY KEY,
-	role       TEXT NOT NULL DEFAULT 'user',
-	created_by TEXT NOT NULL DEFAULT '',
-	created_at INTEGER NOT NULL,
-	disabled   INTEGER NOT NULL DEFAULT 0
+	email         TEXT PRIMARY KEY,
+	role          TEXT NOT NULL DEFAULT 'user',
+	created_by    TEXT NOT NULL DEFAULT '',
+	created_at    INTEGER NOT NULL,
+	disabled      INTEGER NOT NULL DEFAULT 0,
+	google_sub    TEXT NOT NULL DEFAULT '',
+	session_epoch INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE IF NOT EXISTS cb_accounts (
+CREATE TABLE IF NOT EXISTS voiceml_accounts (
 	account_sid TEXT PRIMARY KEY,
 	api_key     TEXT NOT NULL DEFAULT '',
 	created_by  TEXT NOT NULL DEFAULT '',
 	created_at  INTEGER NOT NULL,
 	updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS audit_log (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	actor      TEXT NOT NULL,
+	action     TEXT NOT NULL,
+	target     TEXT NOT NULL DEFAULT '',
+	detail     TEXT NOT NULL DEFAULT '',
+	created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
@@ -219,6 +330,15 @@ CREATE TABLE IF NOT EXISTS cb_accounts (
 	}
 
 	for _, col := range []struct{ name, ddl string }{
+		{"google_sub", `ALTER TABLE users ADD COLUMN google_sub TEXT NOT NULL DEFAULT ''`},
+		{"session_epoch", `ALTER TABLE users ADD COLUMN session_epoch INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := s.addColumnIfMissing(ctx, "users", col.name, col.ddl); err != nil {
+			return err
+		}
+	}
+
+	for _, col := range []struct{ name, ddl string }{
 		{"disp_status", `ALTER TABLE calls ADD COLUMN disp_status TEXT NOT NULL DEFAULT ''`},
 		{"disp_duration_sec", `ALTER TABLE calls ADD COLUMN disp_duration_sec INTEGER NOT NULL DEFAULT 0`},
 		{"disp_sip_code", `ALTER TABLE calls ADD COLUMN disp_sip_code INTEGER NOT NULL DEFAULT 0`},
@@ -226,12 +346,21 @@ CREATE TABLE IF NOT EXISTS cb_accounts (
 		{"disp_error_message", `ALTER TABLE calls ADD COLUMN disp_error_message TEXT NOT NULL DEFAULT ''`},
 		{"disp_notified_at", `ALTER TABLE calls ADD COLUMN disp_notified_at INTEGER NOT NULL DEFAULT 0`},
 		{"disp_raw", `ALTER TABLE calls ADD COLUMN disp_raw TEXT NOT NULL DEFAULT ''`},
-		{"cb_record_json", `ALTER TABLE calls ADD COLUMN cb_record_json TEXT NOT NULL DEFAULT ''`},
-		{"cb_fetched_at", `ALTER TABLE calls ADD COLUMN cb_fetched_at INTEGER NOT NULL DEFAULT 0`},
+		{"voiceml_record_json", `ALTER TABLE calls ADD COLUMN voiceml_record_json TEXT NOT NULL DEFAULT ''`},
+		{"voiceml_fetched_at", `ALTER TABLE calls ADD COLUMN voiceml_fetched_at INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := s.addColumnIfMissing(ctx, "calls", col.name, col.ddl); err != nil {
 			return err
 		}
+	}
+
+	// Schema version stamp. Migrations above are idempotent
+	// (IF NOT EXISTS + addColumnIfMissing), so existing databases
+	// converge regardless of the version they started at; the stamp
+	// exists so a future non-idempotent migration has a baseline to
+	// gate on.
+	if _, err := s.db.ExecContext(ctx, `PRAGMA user_version = 1`); err != nil {
+		return fmt.Errorf("store: stamp user_version: %w", err)
 	}
 
 	return nil
@@ -299,6 +428,13 @@ func nullIfEmpty(v string) any {
 	return v
 }
 
+// escapeLike escapes LIKE wildcards in user search text (queries use
+// ESCAPE '\'), so "%" and "_" match literally instead of acting as
+// wildcards.
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 // RecordLeg persists one finalized recording leg, creating or updating
 // the parent call row (keyed by the SIPREC dialog Call-ID) and merging
 // any AMD-first placeholder row that shares the CallSid or FsUUID.
@@ -332,11 +468,32 @@ func (s *Store) RecordLeg(ctx context.Context, leg siprecsrv.FinalizedLeg) error
 
 	defer func() { _ = tx.Rollback() }()
 
+	// If a DIFFERENT dialog's row already owns this CallSid (a second
+	// SIPREC session for the same call — re-record after a transfer,
+	// an SRC restart), this session must not claim or collide with
+	// that row: record it under its own SIP Call-ID without the
+	// CallSid key. The first dialog keeps the CallSid correlation.
+	insertCallSid := leg.CallSid
+
+	if leg.CallSid != "" {
+		var ownerSipID string
+
+		oerr := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(sip_call_id, '') FROM calls WHERE call_sid = ?`,
+			leg.CallSid).Scan(&ownerSipID)
+		switch {
+		case oerr == nil && ownerSipID != "" && ownerSipID != leg.CallID:
+			insertCallSid = ""
+		case oerr != nil && !errors.Is(oerr, sql.ErrNoRows):
+			return fmt.Errorf("store: check call_sid owner: %w", oerr)
+		}
+	}
+
 	// Claim any AMD-first placeholder row for this call (matched by
 	// CallSid or FsUUID) by stamping it with our SIP Call-ID, so the
 	// upsert below refreshes that row — AMD fields and all — instead
 	// of colliding with its UNIQUE call_sid.
-	if leg.CallSid != "" {
+	if leg.CallSid != "" && insertCallSid != "" {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE calls SET sip_call_id = ? WHERE call_sid = ? AND sip_call_id IS NULL`,
 			leg.CallID, leg.CallSid); err != nil {
@@ -374,7 +531,7 @@ ON CONFLICT(sip_call_id) DO UPDATE SET
 	metadata_json = CASE WHEN excluded.metadata_json != '' THEN excluded.metadata_json ELSE calls.metadata_json END,
 	metadata_xml  = CASE WHEN excluded.metadata_xml != '' THEN excluded.metadata_xml ELSE calls.metadata_xml END,
 	updated_at    = excluded.updated_at;`,
-		leg.CallID, nullIfEmpty(leg.CallSid), leg.FsUUID, leg.AccountSid, leg.FromURI,
+		leg.CallID, nullIfEmpty(insertCallSid), leg.FsUUID, leg.AccountSid, leg.FromURI,
 		fromNumber, toNumber, millis(leg.StartedAt), millis(now), leg.DurationSec,
 		metaJSON, leg.MetadataXML, millis(now), millis(now))
 	if err != nil {
@@ -434,13 +591,13 @@ func mergePlaceholder(ctx context.Context, tx *sql.Tx, callPK int64, callSid, fs
 	if callSid != "" {
 		err = find(`SELECT id, amd_answered_by, amd_duration_ms, amd_call_status, amd_raw,
 			amd_notified_at, started_at FROM calls
-			WHERE call_sid = ? AND id != ? AND sip_call_id IS NULL`, callSid)
+			WHERE call_sid = ? AND id != ? AND sip_call_id IS NULL ORDER BY started_at DESC LIMIT 1`, callSid)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) && fsUUID != "" {
 		err = find(`SELECT id, amd_answered_by, amd_duration_ms, amd_call_status, amd_raw,
 			amd_notified_at, started_at FROM calls
-			WHERE fs_uuid = ? AND id != ? AND sip_call_id IS NULL`, fsUUID)
+			WHERE fs_uuid = ? AND id != ? AND sip_call_id IS NULL ORDER BY started_at DESC LIMIT 1`, fsUUID)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) {
@@ -477,10 +634,20 @@ func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, e
 
 	now := time.Now().UTC()
 
+	// One transaction: the store's single connection serializes
+	// writers, so lookup + write cannot interleave with a concurrent
+	// notification for the same new key and trip the UNIQUE indexes.
+	tx, terr := s.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return 0, false, fmt.Errorf("store: amd begin: %w", terr)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
 	var id int64
 
 	find := func(query string, arg string) error {
-		return s.db.QueryRowContext(ctx, query, arg).Scan(&id)
+		return tx.QueryRowContext(ctx, query, arg).Scan(&id)
 	}
 
 	err := sql.ErrNoRows
@@ -493,7 +660,7 @@ func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, e
 	}
 
 	if errors.Is(err, sql.ErrNoRows) && n.FsUUID != "" {
-		err = find(`SELECT id FROM calls WHERE fs_uuid = ?`, n.FsUUID)
+		err = find(`SELECT id FROM calls WHERE fs_uuid = ? ORDER BY started_at DESC LIMIT 1`, n.FsUUID)
 	}
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -501,12 +668,24 @@ func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, e
 	}
 
 	if err == nil {
-		_, uerr := s.db.ExecContext(ctx, `
+		// Never steal a CallSid another row owns, and never stamp a
+		// SIP Call-ID onto a row whose CallSid names a different call.
+		effCallSid := n.CallSid
+		if effCallSid != "" {
+			var ownerID int64
+			if oerr := tx.QueryRowContext(ctx,
+				`SELECT id FROM calls WHERE call_sid = ?`, effCallSid).Scan(&ownerID); oerr == nil && ownerID != id {
+				effCallSid = ""
+			}
+		}
+
+		_, uerr := tx.ExecContext(ctx, `
 UPDATE calls SET
 	amd_answered_by = ?, amd_duration_ms = ?, amd_call_status = ?,
 	amd_raw = ?, amd_notified_at = ?,
 	call_sid    = COALESCE(call_sid, ?),
-	sip_call_id = COALESCE(sip_call_id, ?),
+	sip_call_id = CASE WHEN COALESCE(call_sid, '') = '' OR call_sid = ?
+		THEN COALESCE(sip_call_id, ?) ELSE sip_call_id END,
 	fs_uuid     = CASE WHEN fs_uuid = '' THEN ? ELSE fs_uuid END,
 	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
@@ -515,16 +694,20 @@ UPDATE calls SET
 	updated_at  = ?
 WHERE id = ?;`,
 			n.AnsweredBy, n.DurationMs, n.CallStatus, n.Raw, millis(now),
-			nullIfEmpty(n.CallSid), nullIfEmpty(n.SipCallID), n.FsUUID,
+			nullIfEmpty(effCallSid), n.CallSid, nullIfEmpty(n.SipCallID), n.FsUUID,
 			n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
 		if uerr != nil {
 			return 0, false, fmt.Errorf("store: amd update %d: %w", id, uerr)
 		}
 
+		if cerr := tx.Commit(); cerr != nil {
+			return 0, false, fmt.Errorf("store: amd commit: %w", cerr)
+		}
+
 		return id, true, nil
 	}
 
-	res, ierr := s.db.ExecContext(ctx, `
+	res, ierr := tx.ExecContext(ctx, `
 INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, amd_answered_by, amd_duration_ms,
 	amd_call_status, amd_notified_at, amd_raw, created_at, updated_at)
@@ -539,6 +722,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?);`,
 	newID, ierr := res.LastInsertId()
 	if ierr != nil {
 		return 0, false, fmt.Errorf("store: amd insert id: %w", ierr)
+	}
+
+	if cerr := tx.Commit(); cerr != nil {
+		return 0, false, fmt.Errorf("store: amd commit: %w", cerr)
 	}
 
 	return newID, false, nil
@@ -558,9 +745,10 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 	args := []any{}
 
 	if f.Query != "" {
-		where += ` AND (from_number LIKE ? OR to_number LIKE ? OR call_sid LIKE ?
-			OR sip_call_id LIKE ? OR fs_uuid LIKE ?)`
-		like := "%" + f.Query + "%"
+		where += ` AND (from_number LIKE ? ESCAPE '\' OR to_number LIKE ? ESCAPE '\'
+			OR call_sid LIKE ? ESCAPE '\' OR sip_call_id LIKE ? ESCAPE '\'
+			OR fs_uuid LIKE ? ESCAPE '\')`
+		like := "%" + escapeLike(f.Query) + "%"
 		args = append(args, like, like, like, like, like)
 	}
 
@@ -611,15 +799,15 @@ const callCols = `SELECT id, COALESCE(sip_call_id,''), COALESCE(call_sid,''), CO
 	duration_sec, status, amd_answered_by, amd_duration_ms, amd_call_status,
 	amd_notified_at, amd_raw, metadata_json, metadata_xml,
 	disp_status, disp_duration_sec, disp_sip_code, disp_error_code,
-	disp_error_message, disp_notified_at, disp_raw, cb_record_json,
-	cb_fetched_at, created_at, updated_at,
+	disp_error_message, disp_notified_at, disp_raw, voiceml_record_json,
+	voiceml_fetched_at, created_at, updated_at,
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id),
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.write_error != '')`
 
 func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 	var c Call
 
-	var started, ended, amdAt, dispAt, cbAt, created, updated int64
+	var started, ended, amdAt, dispAt, vmAt, created, updated int64
 
 	var writeErrLegs int
 
@@ -628,7 +816,7 @@ func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 		&c.DurationSec, &c.Status, &c.AMDAnsweredBy, &c.AMDDurationMs, &c.AMDCallStatus,
 		&amdAt, &c.AMDRaw, &c.MetadataJSON, &c.MetadataXML,
 		&c.DispStatus, &c.DispDurationSec, &c.DispSipCode, &c.DispErrorCode,
-		&c.DispErrorMessage, &dispAt, &c.DispRaw, &c.CBRecordJSON, &cbAt,
+		&c.DispErrorMessage, &dispAt, &c.DispRaw, &c.VoiceMLRecordJSON, &vmAt,
 		&created, &updated, &c.LegCount, &writeErrLegs); err != nil {
 		return Call{}, fmt.Errorf("store: scan call: %w", err)
 	}
@@ -636,7 +824,7 @@ func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 	c.HasWriteError = writeErrLegs > 0
 
 	c.StartedAt, c.EndedAt, c.AMDNotifiedAt = fromMillis(started), fromMillis(ended), fromMillis(amdAt)
-	c.DispNotifiedAt, c.CBFetchedAt = fromMillis(dispAt), fromMillis(cbAt)
+	c.DispNotifiedAt, c.VoiceMLFetchedAt = fromMillis(dispAt), fromMillis(vmAt)
 	c.CreatedAt, c.UpdatedAt = fromMillis(created), fromMillis(updated)
 
 	return c, nil
@@ -747,8 +935,8 @@ func (s *Store) UpsertUser(ctx context.Context, u User) error {
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO users (email, role, created_by, created_at, disabled)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO users (email, role, created_by, created_at, disabled, google_sub, session_epoch)
+VALUES (?, ?, ?, ?, ?, '', 0)
 ON CONFLICT(email) DO UPDATE SET role = excluded.role, disabled = excluded.disabled;`,
 		NormalizeEmail(u.Email), role, u.CreatedBy, millis(u.CreatedAt), boolInt(u.Disabled))
 	if err != nil {
@@ -767,8 +955,9 @@ func (s *Store) GetUser(ctx context.Context, email string) (*User, error) {
 	var disabled int
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT email, role, created_by, created_at, disabled FROM users WHERE email = ?`,
-		NormalizeEmail(email)).Scan(&u.Email, &u.Role, &u.CreatedBy, &created, &disabled)
+		`SELECT email, role, created_by, created_at, disabled, google_sub, session_epoch FROM users WHERE email = ?`,
+		NormalizeEmail(email)).Scan(&u.Email, &u.Role, &u.CreatedBy, &created, &disabled,
+		&u.GoogleSub, &u.SessionEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -785,7 +974,7 @@ func (s *Store) GetUser(ctx context.Context, email string) (*User, error) {
 // ListUsers returns every user, ordered by email.
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT email, role, created_by, created_at, disabled FROM users ORDER BY email`)
+		`SELECT email, role, created_by, created_at, disabled, google_sub, session_epoch FROM users ORDER BY email`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list users: %w", err)
 	}
@@ -801,7 +990,8 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 
 		var disabled int
 
-		if err := rows.Scan(&u.Email, &u.Role, &u.CreatedBy, &created, &disabled); err != nil {
+		if err := rows.Scan(&u.Email, &u.Role, &u.CreatedBy, &created, &disabled,
+			&u.GoogleSub, &u.SessionEpoch); err != nil {
 			return nil, fmt.Errorf("store: scan user: %w", err)
 		}
 
@@ -870,7 +1060,7 @@ func participantForLabel(rec *siprecsrv.Recording, label string) string {
 
 // DispositionNotification is one final call-outcome notification as
 // accepted by POST /api/notify/disposition. Field names follow
-// callBroadcast's StatusCallback payload (CallSid, CallStatus,
+// VoiceML's StatusCallback payload (CallSid, CallStatus,
 // CallDuration, SipResponseCode, ErrorCode, …).
 type DispositionNotification struct {
 	CallSid      string
@@ -900,10 +1090,17 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 
 	now := time.Now().UTC()
 
+	tx, terr := s.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return 0, false, fmt.Errorf("store: disposition begin: %w", terr)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
 	var id int64
 
 	find := func(query string, arg string) error {
-		return s.db.QueryRowContext(ctx, query, arg).Scan(&id)
+		return tx.QueryRowContext(ctx, query, arg).Scan(&id)
 	}
 
 	err := sql.ErrNoRows
@@ -916,7 +1113,7 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 	}
 
 	if errors.Is(err, sql.ErrNoRows) && n.FsUUID != "" {
-		err = find(`SELECT id FROM calls WHERE fs_uuid = ?`, n.FsUUID)
+		err = find(`SELECT id FROM calls WHERE fs_uuid = ? ORDER BY started_at DESC LIMIT 1`, n.FsUUID)
 	}
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -924,7 +1121,16 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 	}
 
 	if err == nil {
-		_, uerr := s.db.ExecContext(ctx, `
+		effCallSid := n.CallSid
+		if effCallSid != "" {
+			var ownerID int64
+			if oerr := tx.QueryRowContext(ctx,
+				`SELECT id FROM calls WHERE call_sid = ?`, effCallSid).Scan(&ownerID); oerr == nil && ownerID != id {
+				effCallSid = ""
+			}
+		}
+
+		_, uerr := tx.ExecContext(ctx, `
 UPDATE calls SET
 	disp_status = ?, disp_duration_sec = ?, disp_sip_code = ?,
 	disp_error_code = ?, disp_error_message = ?, disp_raw = ?,
@@ -933,7 +1139,8 @@ UPDATE calls SET
 	amd_call_status = CASE WHEN amd_call_status = '' THEN ? ELSE amd_call_status END,
 	amd_notified_at = CASE WHEN amd_notified_at = 0 AND ? != '' THEN ? ELSE amd_notified_at END,
 	call_sid    = COALESCE(call_sid, ?),
-	sip_call_id = COALESCE(sip_call_id, ?),
+	sip_call_id = CASE WHEN COALESCE(call_sid, '') = '' OR call_sid = ?
+		THEN COALESCE(sip_call_id, ?) ELSE sip_call_id END,
 	fs_uuid     = CASE WHEN fs_uuid = '' THEN ? ELSE fs_uuid END,
 	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
@@ -943,10 +1150,14 @@ UPDATE calls SET
 WHERE id = ?;`,
 			n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
 			n.Raw, millis(now), n.AnsweredBy, n.CallStatus, n.AnsweredBy,
-			millis(now), nullIfEmpty(n.CallSid), nullIfEmpty(n.SipCallID),
+			millis(now), nullIfEmpty(effCallSid), n.CallSid, nullIfEmpty(n.SipCallID),
 			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
 		if uerr != nil {
 			return 0, false, fmt.Errorf("store: disposition update %d: %w", id, uerr)
+		}
+
+		if cerr := tx.Commit(); cerr != nil {
+			return 0, false, fmt.Errorf("store: disposition commit: %w", cerr)
 		}
 
 		return id, true, nil
@@ -957,7 +1168,7 @@ WHERE id = ?;`,
 		amdAt = millis(now)
 	}
 
-	res, ierr := s.db.ExecContext(ctx, `
+	res, ierr := tx.ExecContext(ctx, `
 INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, disp_status, disp_duration_sec,
 	disp_sip_code, disp_error_code, disp_error_message, disp_notified_at,
@@ -977,13 +1188,17 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 		return 0, false, fmt.Errorf("store: disposition insert id: %w", ierr)
 	}
 
+	if cerr := tx.Commit(); cerr != nil {
+		return 0, false, fmt.Errorf("store: disposition commit: %w", cerr)
+	}
+
 	return newID, false, nil
 }
 
-// CBRecord is the subset of callBroadcast's Call resource the store
+// VoiceMLRecord is the subset of VoiceML's Call resource the store
 // denormalizes when a fetched record is saved. Duration arrives as a
 // string in Twilio-shaped JSON ("duration": "12").
-type CBRecord struct {
+type VoiceMLRecord struct {
 	Sid         string
 	AccountSid  string
 	From        string
@@ -994,16 +1209,16 @@ type CBRecord struct {
 	DurationSec int
 }
 
-// SaveCBRecord stores a Call record fetched from callBroadcast
+// SaveVoiceMLRecord stores a Call record fetched from VoiceML
 // (pretty-printed JSON verbatim) and fills still-empty identity /
 // disposition fields from it. The recording-owned fields are never
 // overwritten.
-func (s *Store) SaveCBRecord(ctx context.Context, callPK int64, rec CBRecord, prettyJSON string) error {
+func (s *Store) SaveVoiceMLRecord(ctx context.Context, callPK int64, rec VoiceMLRecord, prettyJSON string) error {
 	now := time.Now().UTC()
 
 	_, err := s.db.ExecContext(ctx, `
 UPDATE calls SET
-	cb_record_json = ?, cb_fetched_at = ?,
+	voiceml_record_json = ?, voiceml_fetched_at = ?,
 	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
 	call_sid    = COALESCE(call_sid, ?),
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
@@ -1024,13 +1239,13 @@ WHERE id = ?;`,
 	return nil
 }
 
-// --- callBroadcast per-account API keys ----------------------------------
+// --- VoiceML per-account API keys ----------------------------------
 
-// CBAccount is one stored callBroadcast credential: the API key for
+// VoiceMLAccount is one stored VoiceML credential: the API key for
 // one AccountSid, used to fetch that account's Call records on
 // request. Keys are stored so the fetch can run; they are never
 // shown back in full by the UI.
-type CBAccount struct {
+type VoiceMLAccount struct {
 	AccountSid string
 	APIKey     string
 	CreatedBy  string
@@ -1038,12 +1253,12 @@ type CBAccount struct {
 	UpdatedAt  time.Time
 }
 
-// UpsertCBAccount adds or replaces the API key for an account.
-func (s *Store) UpsertCBAccount(ctx context.Context, a CBAccount) error {
+// UpsertVoiceMLAccount adds or replaces the API key for an account.
+func (s *Store) UpsertVoiceMLAccount(ctx context.Context, a VoiceMLAccount) error {
 	now := time.Now().UTC()
 
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO cb_accounts (account_sid, api_key, created_by, created_at, updated_at)
+INSERT INTO voiceml_accounts (account_sid, api_key, created_by, created_at, updated_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(account_sid) DO UPDATE SET
 	api_key = excluded.api_key, updated_at = excluded.updated_at;`,
@@ -1055,15 +1270,15 @@ ON CONFLICT(account_sid) DO UPDATE SET
 	return nil
 }
 
-// GetCBAccount returns the account row (including key), or (nil, nil).
-func (s *Store) GetCBAccount(ctx context.Context, accountSid string) (*CBAccount, error) {
-	var a CBAccount
+// GetVoiceMLAccount returns the account row (including key), or (nil, nil).
+func (s *Store) GetVoiceMLAccount(ctx context.Context, accountSid string) (*VoiceMLAccount, error) {
+	var a VoiceMLAccount
 
 	var created, updated int64
 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT account_sid, api_key, created_by, created_at, updated_at
-		 FROM cb_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid)).
+		 FROM voiceml_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid)).
 		Scan(&a.AccountSid, &a.APIKey, &a.CreatedBy, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1078,21 +1293,21 @@ func (s *Store) GetCBAccount(ctx context.Context, accountSid string) (*CBAccount
 	return &a, nil
 }
 
-// ListCBAccounts returns every configured account, ordered by SID.
-func (s *Store) ListCBAccounts(ctx context.Context) ([]CBAccount, error) {
+// ListVoiceMLAccounts returns every configured account, ordered by SID.
+func (s *Store) ListVoiceMLAccounts(ctx context.Context) ([]VoiceMLAccount, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT account_sid, api_key, created_by, created_at, updated_at
-		 FROM cb_accounts ORDER BY account_sid`)
+		 FROM voiceml_accounts ORDER BY account_sid`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list cb accounts: %w", err)
 	}
 
 	defer func() { _ = rows.Close() }()
 
-	var out []CBAccount
+	var out []VoiceMLAccount
 
 	for rows.Next() {
-		var a CBAccount
+		var a VoiceMLAccount
 
 		var created, updated int64
 
@@ -1111,10 +1326,10 @@ func (s *Store) ListCBAccounts(ctx context.Context) ([]CBAccount, error) {
 	return out, nil
 }
 
-// DeleteCBAccount removes an account's key. Returns whether one existed.
-func (s *Store) DeleteCBAccount(ctx context.Context, accountSid string) (bool, error) {
+// DeleteVoiceMLAccount removes an account's key. Returns whether one existed.
+func (s *Store) DeleteVoiceMLAccount(ctx context.Context, accountSid string) (bool, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM cb_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid))
+		`DELETE FROM voiceml_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid))
 	if err != nil {
 		return false, fmt.Errorf("store: delete cb account: %w", err)
 	}
@@ -1122,6 +1337,103 @@ func (s *Store) DeleteCBAccount(ctx context.Context, accountSid string) (bool, e
 	n, err := res.RowsAffected()
 
 	return n > 0, err
+}
+
+// --- Audit log --------------------------------------------------------------
+
+// AuditEntry is one recorded administrative action.
+type AuditEntry struct {
+	ID        int64
+	Actor     string
+	Action    string
+	Target    string
+	Detail    string
+	CreatedAt time.Time
+}
+
+// Audit records an administrative action (recording deletion, user
+// and key management, record fetches). Best-effort by design at call
+// sites: a failed audit write is logged there, never a reason to fail
+// the action itself — but the store reports errors honestly.
+func (s *Store) Audit(ctx context.Context, actor, action, target, detail string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO audit_log (actor, action, target, detail, created_at)
+		 VALUES (?, ?, ?, ?, ?);`,
+		actor, action, target, detail, millis(time.Now().UTC()))
+	if err != nil {
+		return fmt.Errorf("store: audit %s: %w", action, err)
+	}
+
+	return nil
+}
+
+// ListAudit returns the newest audit entries first.
+func (s *Store) ListAudit(ctx context.Context, limit int) ([]AuditEntry, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, actor, action, target, detail, created_at
+		 FROM audit_log ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store: list audit: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	var out []AuditEntry
+
+	for rows.Next() {
+		var e AuditEntry
+
+		var created int64
+
+		if err := rows.Scan(&e.ID, &e.Actor, &e.Action, &e.Target, &e.Detail, &created); err != nil {
+			return nil, fmt.Errorf("store: scan audit: %w", err)
+		}
+
+		e.CreatedAt = fromMillis(created)
+		out = append(out, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list audit rows: %w", err)
+	}
+
+	return out, nil
+}
+
+// --- Google identity pinning + session revocation ---------------------------
+
+// SetGoogleSubIfEmpty pins the Google account ID (sub claim) on
+// first sign-in. Returns false when a different sub is already
+// pinned (the caller must reject the sign-in).
+func (s *Store) SetGoogleSubIfEmpty(ctx context.Context, email, sub string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE users SET google_sub = ? WHERE email = ? AND google_sub = '';`,
+		sub, NormalizeEmail(email))
+	if err != nil {
+		return false, fmt.Errorf("store: pin google sub: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+
+	return n > 0, err
+}
+
+// BumpSessionEpoch revokes every outstanding session for a user:
+// sessions carry the epoch they were minted at and stop validating
+// as soon as it no longer matches.
+func (s *Store) BumpSessionEpoch(ctx context.Context, email string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET session_epoch = session_epoch + 1 WHERE email = ?;`,
+		NormalizeEmail(email))
+	if err != nil {
+		return fmt.Errorf("store: bump session epoch: %w", err)
+	}
+
+	return nil
 }
 
 // Finalizer adapts Store to siprecsrv.Finalizer.

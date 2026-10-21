@@ -6,16 +6,17 @@ import (
 	"strings"
 )
 
-// MediaDescription holds the bits of one m=audio block we care about:
-// the remote port FreeSWITCH advertises (so we know where to send
-// our own RTP if we wanted to, though we don't), the codec payload
-// type, and the codec name.
+// MediaDescription holds the bits of one m=audio block we care
+// about: the offered port and payload types, the codec we chose,
+// the direction, and the SIPREC label.
 type MediaDescription struct {
-	Port        int    // remote RTP port (FS-side)
-	PayloadType int    // RTP payload type (0=PCMU, 8=PCMA)
-	CodecName   string // "PCMU" or "PCMA" (uppercase, normalised)
-	Label       string // a=label:<id> — SIPREC tags each stream with the leg
-	Direction   string // a=sendonly|sendrecv|recvonly|inactive; "" if absent (SRC offers are sendonly)
+	Port         int    // remote RTP port (FS-side); 0 = declined stream
+	PayloadType  int    // first RTP payload type on the m= line
+	PayloadTypes []int  // every payload type on the m= line, in offer order
+	CodecName    string // chosen supported codec: "PCMU" or "PCMA" ("" if none offered)
+	Label        string // a=label:<id>, sanitised — SIPREC tags each stream with the leg
+	Direction    string // a=sendonly|sendrecv|recvonly|inactive; "" if absent (SRC offers are sendonly)
+	ConnectionIP string // media-level c= address when present
 }
 
 // ParsedSDP is the slice of an INVITE's SDP we extract: the
@@ -39,6 +40,16 @@ func ParseSDP(sdp string) (*ParsedSDP, error) {
 
 	var current *MediaDescription
 
+	curRtp := map[int]string{}
+
+	finalizeMedia := func() {
+		if current == nil {
+			return
+		}
+
+		current.CodecName = chooseOfferedCodec(current.PayloadTypes, curRtp)
+	}
+
 	for _, line := range strings.Split(sdp, "\n") {
 		line = strings.TrimRight(line, "\r")
 		if line == "" {
@@ -53,13 +64,21 @@ func ParseSDP(sdp string) (*ParsedSDP, error) {
 
 		switch key {
 		case 'c':
-			// c=IN IP4 192.168.1.1
+			// c=IN IP4 192.168.1.1 (session-level before any m=,
+			// media-level after)
 			parts := strings.Fields(val)
-			if len(parts) >= 3 && current == nil {
-				out.ConnectionIP = parts[2]
+			if len(parts) >= 3 {
+				if current == nil {
+					out.ConnectionIP = parts[2]
+				} else {
+					current.ConnectionIP = parts[2]
+				}
 			}
 		case 'm':
 			// m=audio 40000 RTP/AVP 0 8 101
+			finalizeMedia()
+			curRtp = map[int]string{}
+
 			parts := strings.Fields(val)
 			if len(parts) < 4 || parts[0] != "audio" {
 				current = nil
@@ -72,15 +91,20 @@ func ParseSDP(sdp string) (*ParsedSDP, error) {
 				return nil, fmt.Errorf("srs sdp: bad m=audio port %q: %w", parts[1], err)
 			}
 
-			pt, err := strconv.Atoi(parts[3])
-			if err != nil {
-				return nil, fmt.Errorf("srs sdp: bad payload type %q: %w", parts[3], err)
+			pts := make([]int, 0, len(parts)-3)
+			for _, p := range parts[3:] {
+				pt, err := strconv.Atoi(p)
+				if err != nil {
+					return nil, fmt.Errorf("srs sdp: bad payload type %q: %w", p, err)
+				}
+
+				pts = append(pts, pt)
 			}
 
 			out.Media = append(out.Media, MediaDescription{
-				Port:        port,
-				PayloadType: pt,
-				CodecName:   defaultCodecName(pt),
+				Port:         port,
+				PayloadType:  pts[0],
+				PayloadTypes: pts,
 			})
 			current = &out.Media[len(out.Media)-1]
 		case 'a':
@@ -90,36 +114,54 @@ func ParseSDP(sdp string) (*ParsedSDP, error) {
 
 			switch {
 			case strings.HasPrefix(val, "rtpmap:"):
-				// rtpmap:<pt> <name>/<rate>
-				// An m=audio block can list multiple PTs (e.g.
-				// "RTP/AVP 0 8" → PCMU + PCMA). Each PT gets its
-				// own rtpmap. The FIRST PT in the m= line is the
-				// offerer's preference; only the matching rtpmap
-				// updates CodecName. Without this guard, later
-				// rtpmaps overwrite the chosen codec.
+				// rtpmap:<pt> <name>/<rate> — collected for the
+				// codec choice at the end of the media block.
 				rest := val[len("rtpmap:"):]
 				parts := strings.Fields(rest)
 				if len(parts) >= 2 {
 					var pt int
-					if _, err := fmt.Sscanf(parts[0], "%d", &pt); err == nil &&
-						pt == current.PayloadType {
-						name := strings.SplitN(parts[1], "/", 2)[0]
-						current.CodecName = strings.ToUpper(name)
+					if _, err := fmt.Sscanf(parts[0], "%d", &pt); err == nil {
+						curRtp[pt] = strings.ToUpper(strings.SplitN(parts[1], "/", 2)[0])
 					}
 				}
 			case strings.HasPrefix(val, "label:"):
-				current.Label = val[len("label:"):]
+				// Sanitised at parse: the label is written back
+				// into our SDP answer, so CR/LF or other controls
+				// in it would inject lines into the answer.
+				current.Label = sanitiseLabel(val[len("label:"):])
 			case val == "sendonly" || val == "sendrecv" || val == "recvonly" || val == "inactive":
 				current.Direction = val
 			}
 		}
 	}
 
+	finalizeMedia()
+
 	if len(out.Media) == 0 {
 		return nil, fmt.Errorf("srs sdp: no m=audio in SDP")
 	}
 
 	return out, nil
+}
+
+// chooseOfferedCodec picks the codec we will answer for one offered
+// media block: the first offered payload type we support, in offer
+// order, where support means a static PCMU/PCMA payload type or an
+// rtpmap naming PCMU/PCMA (dynamic payload types included). The
+// answer itself always uses the static payload type for the codec,
+// which the sender adopts from our answer.
+func chooseOfferedCodec(pts []int, rtpmap map[int]string) string {
+	for _, pt := range pts {
+		if name := rtpmap[pt]; name == "PCMU" || name == "PCMA" {
+			return name
+		}
+
+		if name := defaultCodecName(pt); name != "" {
+			return name
+		}
+	}
+
+	return ""
 }
 
 // AllInactive reports whether every offered audio stream is a=inactive —
@@ -154,22 +196,29 @@ func defaultCodecName(pt int) string {
 }
 
 // BuildAnswerSDP composes the SDP we send back in the SIPREC 200
-// OK. Mirrors the offer's m=audio count + codec choice; replaces
-// the ports with our local-side ports.
+// OK. Mirrors the offer's m=audio count; replaces the ports with
+// our local-side ports. For each offered media block we answer the
+// first offered codec we support (PCMU/PCMA, static payload type);
+// if neither is offered we'd return an error — but every
+// SIPREC-emitting SRC offers at least one of these.
 //
-// For each offered media block we pick the first codec we support
-// (PCMU > PCMA preference). If neither is offered we'd return an
-// error — but every SIPREC-emitting SBC offers at least one of
-// these.
-//
-// localIP is the host SRS advertises (caller decides — typically
-// the same address callBroadcast's public host runs on, or a
-// loopback when FS lives on the same box).
+// localIP is the host the SRS advertises (caller decides —
+// typically a loopback when the SRC lives on the same box, else an
+// address the SRC can route RTP to).
 //
 // localPorts must have at least len(offer.Media) entries; the
 // caller has already opened the UDP listeners and knows the port
 // numbers.
 func BuildAnswerSDP(localIP string, offer *ParsedSDP, localPorts []int) (string, error) {
+	return BuildAnswerSDPWithVersion(localIP, offer, localPorts, 0)
+}
+
+// BuildAnswerSDPWithVersion is BuildAnswerSDP with an SDP session
+// version for the o= line, which RFC 3264 §8 requires to increase
+// with every new answer in the same session (re-INVITE answers).
+// A localPorts entry of 0 answers that stream with port 0 (declined,
+// e.g. an offered port-0 stream) and no attributes.
+func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []int, version int) (string, error) {
 	if len(localPorts) < len(offer.Media) {
 		return "", fmt.Errorf("srs sdp: need %d local ports, got %d",
 			len(offer.Media), len(localPorts))
@@ -179,9 +228,7 @@ func BuildAnswerSDP(localIP string, offer *ParsedSDP, localPorts []int) (string,
 
 	// session-level
 	b.WriteString("v=0\r\n")
-	b.WriteString("o=- 0 0 IN IP4 ")
-	b.WriteString(localIP)
-	b.WriteString("\r\n")
+	fmt.Fprintf(&b, "o=- 0 %d IN IP4 %s\r\n", version, localIP)
 	b.WriteString("s=siprec-receiver SRS\r\n")
 	b.WriteString("c=IN IP4 ")
 	b.WriteString(localIP)
@@ -192,19 +239,37 @@ func BuildAnswerSDP(localIP string, offer *ParsedSDP, localPorts []int) (string,
 	for i, m := range offer.Media {
 		pt := chooseAnswerPayload(m)
 		if pt < 0 {
+			if localPorts[i] == 0 && len(m.PayloadTypes) > 0 {
+				// Declined stream with no codec we support: echo
+				// the first offered PT on the port-0 line.
+				fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", m.PayloadTypes[0])
+
+				continue
+			}
+
 			return "", fmt.Errorf("srs sdp: stream %d offers unsupported codec %q",
 				i, m.CodecName)
+		}
+
+		if localPorts[i] == 0 {
+			fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", pt)
+
+			continue
 		}
 
 		fmt.Fprintf(&b, "m=audio %d RTP/AVP %d\r\n", localPorts[i], pt)
 		fmt.Fprintf(&b, "a=rtpmap:%d %s/8000\r\n", pt, codecNameForPayload(pt))
 		// recvonly — we never send RTP back. RFC 7866-compliant
 		// SIPREC SRS answer: the SRC streams to us, we never
-		// stream back. mod_siprec sets bypass_media=true on the
-		// recording leg so FS's media negotiator doesn't trip
-		// on the direction mismatch with sofia's auto-generated
-		// sendrecv offer.
-		b.WriteString("a=recvonly\r\n")
+		// stream back. An inactive offer is answered inactive
+		// (RFC 3264 §6.1); mod_siprec sets bypass_media=true on the
+		// recording leg so FS's media negotiator doesn't trip on
+		// the direction semantics with sofia's generated offers.
+		if m.Direction == "inactive" {
+			b.WriteString("a=inactive\r\n")
+		} else {
+			b.WriteString("a=recvonly\r\n")
+		}
 
 		if m.Label != "" {
 			fmt.Fprintf(&b, "a=label:%s\r\n", m.Label)

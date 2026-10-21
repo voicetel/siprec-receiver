@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{{if .User}}<meta name="csrf-token" content="{{.CSRF}}">{{end}}
 <title>siprec-receiver</title>
 <style>
   body { font-family: system-ui, sans-serif; margin: 0; color: #1a1a1a; }
@@ -40,10 +41,13 @@
   <strong>siprec-receiver</strong>
   <a href="/recordings">Recordings</a>
   {{if .User}}{{if .User.IsAdmin}}<a href="/admin/users">Users</a>
-  <a href="/admin/integrations">Integrations</a>{{end}}{{end}}
+  <a href="/admin/integrations">Integrations</a>
+  <a href="/admin/audit">Audit log</a>{{end}}{{end}}
   <span class="spacer"></span>
   {{if .User}}<span>{{.User.Email}} ({{.User.Role}})</span>
-  <a href="/auth/logout">Sign out</a>{{end}}
+  <form method="post" action="/auth/logout" style="display:inline">
+    <button type="submit">Sign out</button>
+  </form>{{end}}
 </header>
 <main>
 {{if .Msg}}<div class="msg">{{.Msg}}</div>{{end}}

@@ -1,7 +1,7 @@
 // Package recording captures live call audio to WAV files.
 //
-// The Writer is fed PCM samples in the same shape the AMD engine sees
-// (int16 little-endian at the call's sample rate, mono). It writes a
+// The Writer is fed PCM samples (int16 little-endian at the call's
+// sample rate, mono). It writes a
 // 44-byte WAV header on Open, streams int16 samples into the file as
 // they arrive, and patches the data-size + RIFF-size fields on Close so
 // the file is a valid RIFF WAVE container that media players accept.
@@ -35,17 +35,34 @@ type Writer struct {
 	scratch []byte
 }
 
-// Open creates a new WAV file at path, ready to accept samples.
+// Open creates a new WAV file at path (truncating any existing file),
+// ready to accept samples.
 //
 // The file mode is 0o600 — recordings often contain customer audio and
 // should not be world-readable. Caller is responsible for choosing a
 // path inside an appropriate retention-managed directory.
 func Open(path string, sampleRate, channels int) (*Writer, error) {
+	return open(path, sampleRate, channels, false)
+}
+
+// OpenExclusive is Open with O_EXCL: it fails with an error matching
+// os.ErrExist when the file already exists, so a caller generating
+// unique names can prove it never overwrote a prior recording.
+func OpenExclusive(path string, sampleRate, channels int) (*Writer, error) {
+	return open(path, sampleRate, channels, true)
+}
+
+func open(path string, sampleRate, channels int, exclusive bool) (*Writer, error) {
 	if sampleRate <= 0 || channels <= 0 {
 		return nil, fmt.Errorf("invalid wav params: sampleRate=%d channels=%d", sampleRate, channels)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if exclusive {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_EXCL
+	}
+
+	f, err := os.OpenFile(path, flags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open wav %s: %w", path, err)
 	}

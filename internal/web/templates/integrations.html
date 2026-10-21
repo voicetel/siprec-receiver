@@ -1,15 +1,15 @@
 {{template "header" .}}
-<h1>callBroadcast integrations</h1>
+<h1>VoiceML integrations</h1>
 
 <p>To enrich a recording with the full calling record, the receiver
 fetches <code>GET /2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json</code>
-from callBroadcast when someone clicks <em>Fetch full record</em> on a
-call page. callBroadcast API keys are per-account, so each account's
+from VoiceML when someone clicks <em>Fetch full record</em> on a
+call page. VoiceML API keys are per-account, so each account's
 key is stored here. Keys are write-only: they are never displayed
 after saving, and fetches use them only as the Basic-auth password.</p>
 
-<p>callBroadcast base URL (from <code>CALLBROADCAST_BASE_URL</code>):
-{{if .CBBaseURL}}<code>{{.CBBaseURL}}</code>{{else}}<strong>not configured</strong> — fetches are disabled until it is set.{{end}}</p>
+<p>VoiceML base URL (from <code>VOICEML_BASE_URL</code>):
+{{if .VoiceMLBaseURL}}<code>{{.VoiceMLBaseURL}}</code>{{else}}<strong>not configured</strong> — fetches are disabled until it is set.{{end}}</p>
 
 <table>
   <thead>
@@ -25,7 +25,7 @@ after saving, and fetches use them only as the Basic-auth password.</p>
       <td>{{fmtTime .UpdatedAt}}</td>
       <td>
         <form method="post" action="/admin/integrations/delete"
-          onsubmit="return confirm('Remove the callBroadcast key for {{.AccountSid}}?')">
+          onsubmit="return confirm('Remove the VoiceML key for {{.AccountSid}}?')">
           <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="account_sid" value="{{.AccountSid}}">
           <button class="danger" type="submit">Remove</button>
@@ -33,7 +33,7 @@ after saving, and fetches use them only as the Basic-auth password.</p>
       </td>
     </tr>
     {{else}}
-    <tr><td colspan="5">No callBroadcast keys configured yet.</td></tr>
+    <tr><td colspan="5">No VoiceML keys configured yet.</td></tr>
     {{end}}
   </tbody>
 </table>

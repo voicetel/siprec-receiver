@@ -1,4 +1,4 @@
-package cbclient
+package voiceml
 
 import (
 	"context"

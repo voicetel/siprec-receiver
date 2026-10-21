@@ -1,0 +1,26 @@
+{{template "header" .}}
+<h1>Audit log</h1>
+
+<p>Administrative actions, newest first. This log is the record of
+who deleted recordings, changed users, managed VoiceML keys,
+and fetched call records.</p>
+
+<table>
+  <thead>
+    <tr><th>When</th><th>Actor</th><th>Action</th><th>Target</th><th>Detail</th></tr>
+  </thead>
+  <tbody>
+    {{range .Entries}}
+    <tr>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>{{.Actor}}</td>
+      <td><code>{{.Action}}</code></td>
+      <td>{{.Target}}</td>
+      <td>{{.Detail}}</td>
+    </tr>
+    {{else}}
+    <tr><td colspan="5">No actions recorded yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+{{template "footer" .}}

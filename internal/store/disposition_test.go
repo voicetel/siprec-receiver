@@ -73,7 +73,7 @@ func TestApplyDisposition_BeforeRecordingAdopted(t *testing.T) {
 	}
 }
 
-func TestSaveCBRecord_DenormalizesWithoutOverwriting(t *testing.T) {
+func TestSaveVoiceMLRecord_DenormalizesWithoutOverwriting(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
@@ -86,24 +86,24 @@ func TestSaveCBRecord_DenormalizesWithoutOverwriting(t *testing.T) {
 
 	calls, _, _ := s.ListCalls(ctx, ListFilter{})
 
-	err := s.SaveCBRecord(ctx, calls[0].ID, CBRecord{
+	err := s.SaveVoiceMLRecord(ctx, calls[0].ID, VoiceMLRecord{
 		Sid: "CAd3333333333333333333333333333333", AccountSid: "ACtest",
 		From: "+12165285911", To: "+12085179911", Status: "completed",
 		Direction: "outbound-api", AnsweredBy: "human", DurationSec: 57,
 	}, "{\n  \"sid\": \"CAd333\"\n}")
 	if err != nil {
-		t.Fatalf("SaveCBRecord: %v", err)
+		t.Fatalf("SaveVoiceMLRecord: %v", err)
 	}
 
 	call, _ := s.GetCall(ctx, calls[0].ID)
 	if call.AccountSid != "ACtest" || call.FromNumber != "+12165285911" ||
 		call.DispStatus != "completed" || call.DispDurationSec != 57 ||
-		call.AMDAnsweredBy != "human" || call.CBRecordJSON == "" ||
-		call.CBFetchedAt.IsZero() {
+		call.AMDAnsweredBy != "human" || call.VoiceMLRecordJSON == "" ||
+		call.VoiceMLFetchedAt.IsZero() {
 		t.Errorf("after save: acct=%q from=%q disp=%q/%d amd=%q json=%v fetched=%v",
 			call.AccountSid, call.FromNumber, call.DispStatus,
 			call.DispDurationSec, call.AMDAnsweredBy,
-			call.CBRecordJSON != "", call.CBFetchedAt.IsZero())
+			call.VoiceMLRecordJSON != "", call.VoiceMLFetchedAt.IsZero())
 	}
 
 	if call.DurationSec != 55 {
@@ -111,41 +111,41 @@ func TestSaveCBRecord_DenormalizesWithoutOverwriting(t *testing.T) {
 	}
 }
 
-func TestCBAccountsCRUD(t *testing.T) {
+func TestVoiceMLAccountsCRUD(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 
-	if a, _ := s.GetCBAccount(ctx, "ACtest"); a != nil {
+	if a, _ := s.GetVoiceMLAccount(ctx, "ACtest"); a != nil {
 		t.Fatal("unexpected account before upsert")
 	}
 
-	if err := s.UpsertCBAccount(ctx, CBAccount{
+	if err := s.UpsertVoiceMLAccount(ctx, VoiceMLAccount{
 		AccountSid: "ACtest", APIKey: "key-1", CreatedBy: "admin@example.com",
 	}); err != nil {
-		t.Fatalf("UpsertCBAccount: %v", err)
+		t.Fatalf("UpsertVoiceMLAccount: %v", err)
 	}
 
-	a, _ := s.GetCBAccount(ctx, "ACtest")
+	a, _ := s.GetVoiceMLAccount(ctx, "ACtest")
 	if a == nil || a.APIKey != "key-1" {
-		t.Fatalf("GetCBAccount = %+v", a)
+		t.Fatalf("GetVoiceMLAccount = %+v", a)
 	}
 
-	if err := s.UpsertCBAccount(ctx, CBAccount{AccountSid: "ACtest", APIKey: "key-2"}); err != nil {
+	if err := s.UpsertVoiceMLAccount(ctx, VoiceMLAccount{AccountSid: "ACtest", APIKey: "key-2"}); err != nil {
 		t.Fatalf("replace key: %v", err)
 	}
 
-	a, _ = s.GetCBAccount(ctx, "ACtest")
+	a, _ = s.GetVoiceMLAccount(ctx, "ACtest")
 	if a.APIKey != "key-2" {
 		t.Errorf("key after replace = %q", a.APIKey)
 	}
 
-	list, _ := s.ListCBAccounts(ctx)
+	list, _ := s.ListVoiceMLAccounts(ctx)
 	if len(list) != 1 {
-		t.Fatalf("ListCBAccounts = %d", len(list))
+		t.Fatalf("ListVoiceMLAccounts = %d", len(list))
 	}
 
-	deleted, _ := s.DeleteCBAccount(ctx, "ACtest")
+	deleted, _ := s.DeleteVoiceMLAccount(ctx, "ACtest")
 	if !deleted {
-		t.Error("DeleteCBAccount reported false")
+		t.Error("DeleteVoiceMLAccount reported false")
 	}
 }

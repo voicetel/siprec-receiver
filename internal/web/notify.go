@@ -17,7 +17,7 @@ import (
 // handleNotifyAMD is the call-notification endpoint: it logs the AMD
 // (answering-machine detection) disposition for a call.
 //
-// It accepts the exact form field names callBroadcast POSTs to an
+// It accepts the exact form field names VoiceML POSTs to an
 // AsyncAmdStatusCallback URL (CallSid, AccountSid, AnsweredBy,
 // MachineDetectionDuration, From, To, CallStatus, Direction, Caller,
 // Called, ApiVersion) as form-encoding or JSON, plus the SIPREC
@@ -27,11 +27,11 @@ import (
 //	FsUuid    — the FreeSWITCH parent call UUID (the RS-Metadata
 //	            session_id, base64-decoded, identifies the same call)
 //	CallSid   — matched against a recording whose INVITE Request-URI
-//	            carried ;cb-callsid=CA…
+//	            carried ;vm-callsid=CA…
 //
 // Auth is a shared secret (NOTIFY_SECRET): Authorization: Bearer,
 // X-Notify-Secret, or ?secret= (the query form exists for webhook
-// senders like callBroadcast's that cannot set custom headers).
+// senders like VoiceML's that cannot set custom headers).
 // When NOTIFY_SECRET is unset the endpoint is disabled (503) rather
 // than open.
 func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
@@ -87,13 +87,13 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		log.Printf("[notify] apply amd (CallSid=%s SipCallId=%s): %v", n.CallSid, n.SipCallID, err)
+		log.Printf("[notify] apply amd (CallSid=%q SipCallId=%q): %v", n.CallSid, n.SipCallID, err)
 		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[notify] amd logged id=%d matched=%v answeredBy=%s CallSid=%s",
+	log.Printf("[notify] amd logged id=%d matched=%v answeredBy=%q CallSid=%q",
 		id, matched, n.AnsweredBy, n.CallSid)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -162,13 +162,13 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err != nil {
-		log.Printf("[notify] apply disposition (CallSid=%s SipCallId=%s): %v", n.CallSid, n.SipCallID, err)
+		log.Printf("[notify] apply disposition (CallSid=%q SipCallId=%q): %v", n.CallSid, n.SipCallID, err)
 		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
 
 		return
 	}
 
-	log.Printf("[notify] disposition logged id=%d matched=%v status=%s CallSid=%s",
+	log.Printf("[notify] disposition logged id=%d matched=%v status=%q CallSid=%q",
 		id, matched, n.CallStatus, n.CallSid)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -176,7 +176,19 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) notifyAuthorized(r *http.Request) bool {
-	candidates := []string{r.URL.Query().Get("secret")}
+	querySecret := r.URL.Query().Get("secret")
+	if querySecret != "" && hmac.Equal([]byte(querySecret), []byte(s.NotifySecret)) {
+		// The query form exists for webhook senders that cannot set
+		// headers, but URLs land in proxy/access logs — say so once.
+		s.secretQueryWarn.Do(func() {
+			log.Printf("[notify] WARNING: notify secret presented as ?secret= query parameter; " +
+				"it will appear in request logs. Prefer the Authorization: Bearer header.")
+		})
+
+		return true
+	}
+
+	candidates := []string{}
 
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		candidates = append(candidates, strings.TrimPrefix(h, "Bearer "))
@@ -195,7 +207,7 @@ func (s *Server) notifyAuthorized(r *http.Request) bool {
 	return false
 }
 
-// parseNotifyBody accepts JSON or form-encoding (callBroadcast/Twilio
+// parseNotifyBody accepts JSON or form-encoding (VoiceML/Twilio
 // webhooks are form-encoded) and returns a canonical field map plus
 // the raw body kept for audit display.
 func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {

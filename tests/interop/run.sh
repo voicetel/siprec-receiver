@@ -41,7 +41,7 @@ SIPREC_LISTEN=0.0.0.0:5070 SIPREC_NETWORKS=udp SIPREC_LOCAL_IP="$ip" \
 RTP_PORT_MIN=47000 RTP_PORT_MAX=47100 \
 RECORDING_DIR="$out/recordings" DB_PATH="$out/interop.db" \
 HTTP_LISTEN=127.0.0.1:18082 PUBLIC_BASE_URL=http://127.0.0.1:18082 \
-ADMIN_EMAIL=admin@example.com SESSION_SECRET=interop-session \
+ADMIN_EMAIL=admin@example.com SESSION_SECRET=interop-session-secret-for-tests \
 NOTIFY_SECRET=interop-secret \
     "$out/siprec-receiver" > "$out/receiver.log" 2>&1 &
 recv=$!

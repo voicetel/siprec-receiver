@@ -6,7 +6,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // SIPREC RS-Metadata schema per RFC 7865. The XML body in a SIPREC
@@ -299,47 +298,4 @@ func sanitiseLabel(s string) string {
 	}
 
 	return out
-}
-
-// BuildMetadataResponse composes the RS-Metadata XML the SRS
-// returns in the 200 OK to acknowledge the recording session is
-// active. RFC 7865 §6 defines the response shape — it echoes the
-// session_id and reports the recording is active.
-//
-// FS doesn't strictly require the response (StefanYohansson's
-// mod_siprec ignores any application/rs-metadata part in the 200
-// OK) but proper SRS implementations include it so the SBC's view
-// of the session aligns with the SRS's.
-func BuildMetadataResponse(rec *Recording, recordingState string) string {
-	var b strings.Builder
-
-	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	b.WriteString(`<recording xmlns="urn:ietf:params:xml:ns:recording:1">` + "\n")
-	b.WriteString("  <datamode>complete</datamode>\n")
-
-	if rec != nil {
-		for _, s := range rec.Sessions {
-			fmt.Fprintf(&b, "  <session session_id=%q>\n", s.ID)
-			fmt.Fprintf(&b, "    <start-time>%s</start-time>\n",
-				orNow(s.StartTime))
-			fmt.Fprintf(&b, "    <recordingstate>%s</recordingstate>\n",
-				recordingState)
-			b.WriteString("  </session>\n")
-		}
-	}
-
-	b.WriteString("</recording>\n")
-
-	return b.String()
-}
-
-// orNow returns the input when non-empty, otherwise an RFC 3339
-// timestamp for "right now". Used for response start-time when the
-// metadata didn't carry one.
-func orNow(s string) string {
-	if s != "" {
-		return s
-	}
-
-	return time.Now().UTC().Format(time.RFC3339)
 }
