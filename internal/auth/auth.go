@@ -321,7 +321,7 @@ func (a *Authenticator) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	verifier := oauth2.GenerateVerifier()
 
 	for _, c := range []*http.Cookie{ // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
-		{Name: stateCookie, Value: state}, // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
+		{Name: stateCookie, Value: state},       // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 		{Name: verifierCookie, Value: verifier}, // #nosec G124 -- Secure follows the https public URL (secureCookies); HttpOnly+SameSite always set
 	} {
 		c.Path = "/auth/"
