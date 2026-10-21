@@ -349,7 +349,7 @@ func parseRTP(buf []byte) (*rtpHeader, []byte) {
 
 var pcmuTable [256]int16
 
-// μ-law decoded magnitudes are bounded at 8159 (well inside int16). All math
+// μ-law decoded magnitudes are bounded at 32124 (inside int16). All math
 // stays in int16 to avoid widening casts that would otherwise trip overflow
 // checkers.
 func init() {
@@ -359,7 +359,7 @@ func init() {
 		exponent := (b >> 4) & 0x07
 		mantissa := int16(b & 0x0F)
 
-		sample := (mantissa<<1 + 33) << (exponent + 2)
+		sample := ((mantissa<<3 + 132) << exponent) - 132
 		if sign != 0 {
 			sample = -sample
 		}
@@ -391,7 +391,7 @@ func decodePCMUInto(out []int16, data []byte) int {
 
 var pcmaTable [256]int16
 
-// A-law decoded magnitudes are bounded at 4032 (well inside int16). All math
+// A-law decoded magnitudes are bounded at 32256 (inside int16). All math
 // stays in int16 to avoid widening casts that would otherwise trip overflow
 // checkers.
 func init() {
@@ -404,12 +404,12 @@ func init() {
 		var sample int16
 
 		if exponent == 0 {
-			sample = mantissa<<1 + 1
+			sample = mantissa<<4 + 8
 		} else {
-			sample = (mantissa<<1 | 0x21) << (exponent - 1)
+			sample = (mantissa<<4 + 264) << (exponent - 1)
 		}
 
-		if sign != 0 {
+		if sign == 0 {
 			sample = -sample
 		}
 
