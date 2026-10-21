@@ -52,6 +52,17 @@ type Call struct {
 	AMDCallStatus string
 	AMDNotifiedAt time.Time
 	AMDRaw        string
+	// Final call disposition (StatusCallback-shaped; see ApplyDisposition).
+	DispStatus       string
+	DispDurationSec  int
+	DispSipCode      int
+	DispErrorCode    string
+	DispErrorMessage string
+	DispNotifiedAt   time.Time
+	DispRaw          string
+	// Full call record fetched on request from callBroadcast.
+	CBRecordJSON  string
+	CBFetchedAt   time.Time
 	MetadataJSON  string
 	MetadataXML   string
 	CreatedAt     time.Time
@@ -186,15 +197,41 @@ CREATE TABLE IF NOT EXISTS users (
 	created_at INTEGER NOT NULL,
 	disabled   INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS cb_accounts (
+	account_sid TEXT PRIMARY KEY,
+	api_key     TEXT NOT NULL DEFAULT '',
+	created_by  TEXT NOT NULL DEFAULT '',
+	created_at  INTEGER NOT NULL,
+	updated_at  INTEGER NOT NULL
+);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("store: migrate: %w", err)
 	}
 
 	// Columns added after v0.1.0 for databases that already exist.
-	if err := s.addColumnIfMissing(ctx, "legs", "write_error",
-		`ALTER TABLE legs ADD COLUMN write_error TEXT NOT NULL DEFAULT ''`); err != nil {
-		return err
+	for _, col := range []struct{ name, ddl string }{
+		{"write_error", `ALTER TABLE legs ADD COLUMN write_error TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := s.addColumnIfMissing(ctx, "legs", col.name, col.ddl); err != nil {
+			return err
+		}
+	}
+
+	for _, col := range []struct{ name, ddl string }{
+		{"disp_status", `ALTER TABLE calls ADD COLUMN disp_status TEXT NOT NULL DEFAULT ''`},
+		{"disp_duration_sec", `ALTER TABLE calls ADD COLUMN disp_duration_sec INTEGER NOT NULL DEFAULT 0`},
+		{"disp_sip_code", `ALTER TABLE calls ADD COLUMN disp_sip_code INTEGER NOT NULL DEFAULT 0`},
+		{"disp_error_code", `ALTER TABLE calls ADD COLUMN disp_error_code TEXT NOT NULL DEFAULT ''`},
+		{"disp_error_message", `ALTER TABLE calls ADD COLUMN disp_error_message TEXT NOT NULL DEFAULT ''`},
+		{"disp_notified_at", `ALTER TABLE calls ADD COLUMN disp_notified_at INTEGER NOT NULL DEFAULT 0`},
+		{"disp_raw", `ALTER TABLE calls ADD COLUMN disp_raw TEXT NOT NULL DEFAULT ''`},
+		{"cb_record_json", `ALTER TABLE calls ADD COLUMN cb_record_json TEXT NOT NULL DEFAULT ''`},
+		{"cb_fetched_at", `ALTER TABLE calls ADD COLUMN cb_fetched_at INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := s.addColumnIfMissing(ctx, "calls", col.name, col.ddl); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -572,28 +609,34 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 const callCols = `SELECT id, COALESCE(sip_call_id,''), COALESCE(call_sid,''), COALESCE(fs_uuid,''),
 	account_sid, from_uri, from_number, to_number, direction, started_at, ended_at,
 	duration_sec, status, amd_answered_by, amd_duration_ms, amd_call_status,
-	amd_notified_at, amd_raw, metadata_json, metadata_xml, created_at, updated_at,
+	amd_notified_at, amd_raw, metadata_json, metadata_xml,
+	disp_status, disp_duration_sec, disp_sip_code, disp_error_code,
+	disp_error_message, disp_notified_at, disp_raw, cb_record_json,
+	cb_fetched_at, created_at, updated_at,
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id),
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.write_error != '')`
 
 func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 	var c Call
 
-	var started, ended, amdAt, created, updated int64
+	var started, ended, amdAt, dispAt, cbAt, created, updated int64
 
 	var writeErrLegs int
 
 	if err := src.Scan(&c.ID, &c.SipCallID, &c.CallSid, &c.FsUUID, &c.AccountSid,
 		&c.FromURI, &c.FromNumber, &c.ToNumber, &c.Direction, &started, &ended,
 		&c.DurationSec, &c.Status, &c.AMDAnsweredBy, &c.AMDDurationMs, &c.AMDCallStatus,
-		&amdAt, &c.AMDRaw, &c.MetadataJSON, &c.MetadataXML, &created, &updated,
-		&c.LegCount, &writeErrLegs); err != nil {
+		&amdAt, &c.AMDRaw, &c.MetadataJSON, &c.MetadataXML,
+		&c.DispStatus, &c.DispDurationSec, &c.DispSipCode, &c.DispErrorCode,
+		&c.DispErrorMessage, &dispAt, &c.DispRaw, &c.CBRecordJSON, &cbAt,
+		&created, &updated, &c.LegCount, &writeErrLegs); err != nil {
 		return Call{}, fmt.Errorf("store: scan call: %w", err)
 	}
 
 	c.HasWriteError = writeErrLegs > 0
 
 	c.StartedAt, c.EndedAt, c.AMDNotifiedAt = fromMillis(started), fromMillis(ended), fromMillis(amdAt)
+	c.DispNotifiedAt, c.CBFetchedAt = fromMillis(dispAt), fromMillis(cbAt)
 	c.CreatedAt, c.UpdatedAt = fromMillis(created), fromMillis(updated)
 
 	return c, nil
@@ -823,6 +866,262 @@ func participantForLabel(rec *siprecsrv.Recording, label string) string {
 	}
 
 	return ""
+}
+
+// DispositionNotification is one final call-outcome notification as
+// accepted by POST /api/notify/disposition. Field names follow
+// callBroadcast's StatusCallback payload (CallSid, CallStatus,
+// CallDuration, SipResponseCode, ErrorCode, …).
+type DispositionNotification struct {
+	CallSid      string
+	AccountSid   string
+	CallStatus   string
+	DurationSec  int
+	SipCode      int
+	ErrorCode    string
+	ErrorMessage string
+	AnsweredBy   string // terminal callbacks carry the AMD verdict too
+	From         string
+	To           string
+	Direction    string
+	SipCallID    string
+	FsUUID       string
+	Raw          string
+}
+
+// ApplyDisposition logs one final call outcome, with the same
+// match-or-placeholder upsert semantics as ApplyAMD. A disposition
+// that carries AnsweredBy also fills the AMD fields when they are
+// still empty (the terminal StatusCallback repeats the verdict).
+func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification) (int64, bool, error) {
+	if n.CallSid == "" && n.SipCallID == "" && n.FsUUID == "" {
+		return 0, false, ErrNoKey
+	}
+
+	now := time.Now().UTC()
+
+	var id int64
+
+	find := func(query string, arg string) error {
+		return s.db.QueryRowContext(ctx, query, arg).Scan(&id)
+	}
+
+	err := sql.ErrNoRows
+	if n.CallSid != "" {
+		err = find(`SELECT id FROM calls WHERE call_sid = ?`, n.CallSid)
+	}
+
+	if errors.Is(err, sql.ErrNoRows) && n.SipCallID != "" {
+		err = find(`SELECT id FROM calls WHERE sip_call_id = ?`, n.SipCallID)
+	}
+
+	if errors.Is(err, sql.ErrNoRows) && n.FsUUID != "" {
+		err = find(`SELECT id FROM calls WHERE fs_uuid = ?`, n.FsUUID)
+	}
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, false, fmt.Errorf("store: disposition lookup: %w", err)
+	}
+
+	if err == nil {
+		_, uerr := s.db.ExecContext(ctx, `
+UPDATE calls SET
+	disp_status = ?, disp_duration_sec = ?, disp_sip_code = ?,
+	disp_error_code = ?, disp_error_message = ?, disp_raw = ?,
+	disp_notified_at = ?,
+	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
+	amd_call_status = CASE WHEN amd_call_status = '' THEN ? ELSE amd_call_status END,
+	amd_notified_at = CASE WHEN amd_notified_at = 0 AND ? != '' THEN ? ELSE amd_notified_at END,
+	call_sid    = COALESCE(call_sid, ?),
+	sip_call_id = COALESCE(sip_call_id, ?),
+	fs_uuid     = CASE WHEN fs_uuid = '' THEN ? ELSE fs_uuid END,
+	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
+	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
+	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
+	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
+	updated_at  = ?
+WHERE id = ?;`,
+			n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
+			n.Raw, millis(now), n.AnsweredBy, n.CallStatus, n.AnsweredBy,
+			millis(now), nullIfEmpty(n.CallSid), nullIfEmpty(n.SipCallID),
+			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
+		if uerr != nil {
+			return 0, false, fmt.Errorf("store: disposition update %d: %w", id, uerr)
+		}
+
+		return id, true, nil
+	}
+
+	amdAt := int64(0)
+	if n.AnsweredBy != "" {
+		amdAt = millis(now)
+	}
+
+	res, ierr := s.db.ExecContext(ctx, `
+INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
+	to_number, direction, started_at, status, disp_status, disp_duration_sec,
+	disp_sip_code, disp_error_code, disp_error_message, disp_notified_at,
+	disp_raw, amd_answered_by, amd_call_status, amd_notified_at,
+	created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		nullIfEmpty(n.SipCallID), nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
+		n.From, n.To, n.Direction, millis(now), n.CallStatus, n.DurationSec,
+		n.SipCode, n.ErrorCode, n.ErrorMessage, millis(now), n.Raw,
+		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now))
+	if ierr != nil {
+		return 0, false, fmt.Errorf("store: disposition insert: %w", ierr)
+	}
+
+	newID, ierr := res.LastInsertId()
+	if ierr != nil {
+		return 0, false, fmt.Errorf("store: disposition insert id: %w", ierr)
+	}
+
+	return newID, false, nil
+}
+
+// CBRecord is the subset of callBroadcast's Call resource the store
+// denormalizes when a fetched record is saved. Duration arrives as a
+// string in Twilio-shaped JSON ("duration": "12").
+type CBRecord struct {
+	Sid         string
+	AccountSid  string
+	From        string
+	To          string
+	Status      string
+	Direction   string
+	AnsweredBy  string
+	DurationSec int
+}
+
+// SaveCBRecord stores a Call record fetched from callBroadcast
+// (pretty-printed JSON verbatim) and fills still-empty identity /
+// disposition fields from it. The recording-owned fields are never
+// overwritten.
+func (s *Store) SaveCBRecord(ctx context.Context, callPK int64, rec CBRecord, prettyJSON string) error {
+	now := time.Now().UTC()
+
+	_, err := s.db.ExecContext(ctx, `
+UPDATE calls SET
+	cb_record_json = ?, cb_fetched_at = ?,
+	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
+	call_sid    = COALESCE(call_sid, ?),
+	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
+	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
+	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
+	disp_status = CASE WHEN disp_status = '' THEN ? ELSE disp_status END,
+	disp_duration_sec = CASE WHEN disp_duration_sec = 0 THEN ? ELSE disp_duration_sec END,
+	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
+	updated_at  = ?
+WHERE id = ?;`,
+		prettyJSON, millis(now), rec.AccountSid, nullIfEmpty(rec.Sid),
+		rec.From, rec.To, rec.Direction, rec.Status, rec.DurationSec,
+		rec.AnsweredBy, millis(now), callPK)
+	if err != nil {
+		return fmt.Errorf("store: save cb record %d: %w", callPK, err)
+	}
+
+	return nil
+}
+
+// --- callBroadcast per-account API keys ----------------------------------
+
+// CBAccount is one stored callBroadcast credential: the API key for
+// one AccountSid, used to fetch that account's Call records on
+// request. Keys are stored so the fetch can run; they are never
+// shown back in full by the UI.
+type CBAccount struct {
+	AccountSid string
+	APIKey     string
+	CreatedBy  string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// UpsertCBAccount adds or replaces the API key for an account.
+func (s *Store) UpsertCBAccount(ctx context.Context, a CBAccount) error {
+	now := time.Now().UTC()
+
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO cb_accounts (account_sid, api_key, created_by, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(account_sid) DO UPDATE SET
+	api_key = excluded.api_key, updated_at = excluded.updated_at;`,
+		strings.TrimSpace(a.AccountSid), a.APIKey, a.CreatedBy, millis(now), millis(now))
+	if err != nil {
+		return fmt.Errorf("store: upsert cb account: %w", err)
+	}
+
+	return nil
+}
+
+// GetCBAccount returns the account row (including key), or (nil, nil).
+func (s *Store) GetCBAccount(ctx context.Context, accountSid string) (*CBAccount, error) {
+	var a CBAccount
+
+	var created, updated int64
+
+	err := s.db.QueryRowContext(ctx,
+		`SELECT account_sid, api_key, created_by, created_at, updated_at
+		 FROM cb_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid)).
+		Scan(&a.AccountSid, &a.APIKey, &a.CreatedBy, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("store: get cb account: %w", err)
+	}
+
+	a.CreatedAt, a.UpdatedAt = fromMillis(created), fromMillis(updated)
+
+	return &a, nil
+}
+
+// ListCBAccounts returns every configured account, ordered by SID.
+func (s *Store) ListCBAccounts(ctx context.Context) ([]CBAccount, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT account_sid, api_key, created_by, created_at, updated_at
+		 FROM cb_accounts ORDER BY account_sid`)
+	if err != nil {
+		return nil, fmt.Errorf("store: list cb accounts: %w", err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	var out []CBAccount
+
+	for rows.Next() {
+		var a CBAccount
+
+		var created, updated int64
+
+		if err := rows.Scan(&a.AccountSid, &a.APIKey, &a.CreatedBy, &created, &updated); err != nil {
+			return nil, fmt.Errorf("store: scan cb account: %w", err)
+		}
+
+		a.CreatedAt, a.UpdatedAt = fromMillis(created), fromMillis(updated)
+		out = append(out, a)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list cb accounts rows: %w", err)
+	}
+
+	return out, nil
+}
+
+// DeleteCBAccount removes an account's key. Returns whether one existed.
+func (s *Store) DeleteCBAccount(ctx context.Context, accountSid string) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM cb_accounts WHERE account_sid = ?`, strings.TrimSpace(accountSid))
+	if err != nil {
+		return false, fmt.Errorf("store: delete cb account: %w", err)
+	}
+
+	n, err := res.RowsAffected()
+
+	return n > 0, err
 }
 
 // Finalizer adapts Store to siprecsrv.Finalizer.

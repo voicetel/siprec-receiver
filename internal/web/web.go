@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/voicetel/siprec-receiver/internal/auth"
+	"github.com/voicetel/siprec-receiver/internal/cbclient"
 	"github.com/voicetel/siprec-receiver/internal/store"
 )
 
@@ -27,6 +29,7 @@ type Server struct {
 	Auth         *auth.Authenticator
 	RecordingDir string
 	NotifySecret string
+	CBBaseURL    string // callBroadcast base URL for on-request record fetches; "" disables
 
 	tmpl *template.Template
 }
@@ -44,7 +47,7 @@ var amdDispositions = []string{
 }
 
 // New builds a Server and parses the embedded templates.
-func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret string) (*Server, error) {
+func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, cbBaseURL string) (*Server, error) {
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -72,6 +75,7 @@ func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret stri
 		Auth:         a,
 		RecordingDir: recordingDir,
 		NotifySecret: notifySecret,
+		CBBaseURL:    strings.TrimRight(strings.TrimSpace(cbBaseURL), "/"),
 		tmpl:         tmpl,
 	}, nil
 }
@@ -86,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	})
 
 	mux.HandleFunc("POST /api/notify/amd", s.handleNotifyAMD)
+	mux.HandleFunc("POST /api/notify/disposition", s.handleNotifyDisposition)
 
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.Handle("GET /auth/login", http.HandlerFunc(s.Auth.HandleLogin))
@@ -99,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	authed.HandleFunc("GET /recordings", s.handleList)
 	authed.HandleFunc("GET /recordings/{id}", s.handleDetail)
 	authed.HandleFunc("GET /recordings/{id}/legs/{legID}/audio", s.handleAudio)
+	authed.HandleFunc("POST /recordings/{id}/fetch-record", s.handleFetchRecord)
 	authed.Handle("POST /recordings/{id}/delete",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleDelete)))
 	authed.Handle("GET /admin/users",
@@ -107,6 +113,12 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserUpsert)))
 	authed.Handle("POST /admin/users/delete",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserDelete)))
+	authed.Handle("GET /admin/integrations",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrations)))
+	authed.Handle("POST /admin/integrations",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrationUpsert)))
+	authed.Handle("POST /admin/integrations/delete",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrationDelete)))
 
 	mux.Handle("/", s.Auth.RequireAuth(authed))
 
@@ -341,6 +353,93 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/recordings?msg=Recording+deleted", http.StatusSeeOther)
 }
 
+// handleFetchRecord pulls the full Call record for this call from
+// callBroadcast, on request, using the per-account API key an
+// administrator configured under Integrations. Any signed-in user may
+// refresh: the fetch only reads callBroadcast and stores what it
+// answered. Errors are reported as page messages, never as raw
+// upstream bodies (which can echo account SIDs).
+func (s *Server) handleFetchRecord(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user.Email) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		http.NotFound(w, r)
+
+		return
+	}
+
+	detail := "/recordings/" + strconv.FormatInt(id, 10)
+	fail := func(msg string) {
+		http.Redirect(w, r, detail+"?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	}
+
+	call, err := s.Store.GetCall(r.Context(), id)
+	if err != nil {
+		log.Printf("[web] fetch-record: get call %d: %v", id, err)
+		http.Error(w, "failed to load call", http.StatusInternalServerError)
+
+		return
+	}
+
+	if call == nil {
+		http.NotFound(w, r)
+
+		return
+	}
+
+	switch {
+	case call.CallSid == "":
+		fail("This call has no CallSid, so there is nothing to fetch. " +
+			"Stamp cb-callsid on the SRS URI (or notify it) to link the call.")
+		return
+	case call.AccountSid == "":
+		fail("This call has no AccountSid, so the account's API key can't be selected.")
+		return
+	case s.CBBaseURL == "":
+		fail("CALLBROADCAST_BASE_URL is not configured on this server.")
+		return
+	}
+
+	acct, err := s.Store.GetCBAccount(r.Context(), call.AccountSid)
+	if err != nil {
+		log.Printf("[web] fetch-record: key lookup %s: %v", call.AccountSid, err)
+		http.Error(w, "failed to look up callBroadcast credentials", http.StatusInternalServerError)
+
+		return
+	}
+
+	if acct == nil || acct.APIKey == "" {
+		fail("No callBroadcast API key is configured for account " + call.AccountSid +
+			". An administrator can add one under Integrations.")
+		return
+	}
+
+	rec, pretty, err := cbclient.New(s.CBBaseURL).FetchCall(
+		r.Context(), call.AccountSid, acct.APIKey, call.CallSid)
+	if err != nil {
+		log.Printf("[web] fetch-record call %d (CallSid %s): %v", id, call.CallSid, err)
+		fail("Fetching the call record from callBroadcast failed (" + err.Error() + ").")
+		return
+	}
+
+	if err := s.Store.SaveCBRecord(r.Context(), id, rec, pretty); err != nil {
+		log.Printf("[web] fetch-record: save %d: %v", id, err)
+		http.Error(w, "failed to store the fetched record", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] %s fetched callBroadcast record for call %d (CallSid %s, status %s)",
+		user.Email, id, call.CallSid, rec.Status)
+	fail("Call record fetched from callBroadcast.")
+}
+
 // --- Admin: users -----------------------------------------------------------
 
 type usersData struct {
@@ -427,4 +526,82 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[web] admin %s deleted user %s", user.Email, email)
 	http.Redirect(w, r, "/admin/users?msg=User+deleted", http.StatusSeeOther)
+}
+
+// --- Admin: callBroadcast integrations --------------------------------------
+
+type integrationsData struct {
+	baseData
+	Accounts  []store.CBAccount
+	CBBaseURL string
+}
+
+func (s *Server) handleIntegrations(w http.ResponseWriter, r *http.Request) {
+	accounts, err := s.Store.ListCBAccounts(r.Context())
+	if err != nil {
+		log.Printf("[web] list cb accounts: %v", err)
+		http.Error(w, "failed to list integrations", http.StatusInternalServerError)
+
+		return
+	}
+
+	s.render(w, "integrations.html", integrationsData{
+		baseData:  s.base(r),
+		Accounts:  accounts,
+		CBBaseURL: s.CBBaseURL,
+	})
+}
+
+func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user.Email) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	accountSid := strings.TrimSpace(r.FormValue("account_sid"))
+	apiKey := strings.TrimSpace(r.FormValue("api_key"))
+
+	if accountSid == "" || apiKey == "" {
+		http.Redirect(w, r, "/admin/integrations?msg=AccountSid+and+API+key+are+both+required", http.StatusSeeOther)
+
+		return
+	}
+
+	err := s.Store.UpsertCBAccount(r.Context(), store.CBAccount{
+		AccountSid: accountSid,
+		APIKey:     apiKey,
+		CreatedBy:  user.Email,
+	})
+	if err != nil {
+		log.Printf("[web] upsert cb account %s: %v", accountSid, err)
+		http.Error(w, "failed to save integration", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] admin %s saved callBroadcast key for account %s", user.Email, accountSid)
+	http.Redirect(w, r, "/admin/integrations?msg=callBroadcast+key+saved", http.StatusSeeOther)
+}
+
+func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user.Email) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	accountSid := strings.TrimSpace(r.FormValue("account_sid"))
+
+	if _, err := s.Store.DeleteCBAccount(r.Context(), accountSid); err != nil {
+		log.Printf("[web] delete cb account %s: %v", accountSid, err)
+		http.Error(w, "failed to delete integration", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] admin %s deleted callBroadcast key for account %s", user.Email, accountSid)
+	http.Redirect(w, r, "/admin/integrations?msg=callBroadcast+key+deleted", http.StatusSeeOther)
 }

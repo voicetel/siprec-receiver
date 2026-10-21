@@ -17,7 +17,7 @@
   <thead>
     <tr>
       <th>Started</th><th>From</th><th>To</th><th>Duration</th>
-      <th>AMD</th><th>Status</th><th>Legs</th><th></th>
+      <th>AMD</th><th>Outcome</th><th>Status</th><th>Legs</th><th></th>
     </tr>
   </thead>
   <tbody>
@@ -28,12 +28,13 @@
       <td>{{if .ToNumber}}{{.ToNumber}}{{else}}—{{end}}</td>
       <td>{{fmtDur .DurationSec}}</td>
       <td>{{if .AMDAnsweredBy}}<span class="badge amd">{{.AMDAnsweredBy}}</span>{{else}}—{{end}}</td>
+      <td>{{if .DispStatus}}<span class="badge">{{.DispStatus}}</span>{{else}}—{{end}}</td>
       <td><span class="badge {{.Status}}">{{.Status}}</span>{{if .HasWriteError}} <span class="badge" title="A leg hit a WAV write error">⚠ write error</span>{{end}}</td>
       <td>{{.LegCount}}</td>
       <td><a href="/recordings/{{.ID}}">View</a></td>
     </tr>
     {{else}}
-    <tr><td colspan="8">No calls match.</td></tr>
+    <tr><td colspan="9">No calls match.</td></tr>
     {{end}}
   </tbody>
 </table>

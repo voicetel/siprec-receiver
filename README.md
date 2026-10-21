@@ -126,6 +126,7 @@ All configuration is environment variables (see also `.env.example`).
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
 | `RETENTION_DAYS` | `0` (disabled) | Delete calls (rows + WAV files) that started more than this many days ago; swept at startup, then daily |
+| `CALLBROADCAST_BASE_URL` | — (fetches disabled) | Base URL of the callBroadcast deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations) |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
 
 Put the HTTP listener behind a TLS-terminating reverse proxy in
@@ -287,6 +288,56 @@ Responses: 200 logged · 400 malformed/no key/no `AnsweredBy` · 401 bad
 secret · 503 endpoint disabled. Bodies are capped at 64 KB; the raw
 payload is kept on the call record for audit and shown in the UI.
 
+## Call disposition notifications
+
+`POST /api/notify/disposition` is the final-outcome companion: it logs
+what ultimately happened to the call — the content of the terminal
+(`completed`) StatusCallback. Same auth, body shapes, correlation
+keys, upsert semantics, and response codes as the AMD endpoint, except
+`CallStatus` is required instead of `AnsweredBy`:
+
+| Field | Notes |
+|---|---|
+| `CallStatus` | **Required.** `completed`, `busy`, `no-answer`, `failed`, `canceled`, … (stored verbatim) |
+| `CallDuration` | Billable call seconds (kept separate from the recording's audio duration); `Duration` accepted |
+| `SipResponseCode` | Final SIP response code, when the poster knows it |
+| `ErrorCode` / `ErrorMessage` | Failure detail |
+| `AnsweredBy` | Terminal callbacks repeat the AMD verdict; fills the AMD fields when still empty |
+| `CallSid`, `AccountSid`, `From`, `To`, `Direction`, `SipCallId`, `FsUuid` | Same meaning as the AMD endpoint |
+
+```sh
+curl -X POST https://srs.example.com/api/notify/disposition \
+  -H "Authorization: Bearer $NOTIFY_SECRET" \
+  --data-urlencode "CallSid=CA0123456789abcdef0123456789abcdef" \
+  --data-urlencode "CallStatus=completed" \
+  --data-urlencode "CallDuration=62" \
+  --data-urlencode "SipResponseCode=200"
+```
+
+The list view shows the outcome next to the AMD disposition; the call
+page shows duration, SIP code, error, and the raw payload.
+
+## Full call record from callBroadcast (on request)
+
+A recording row can be enriched with the complete calling record from
+callBroadcast — final status, billable duration, price, timestamps,
+`answered_by`, everything in the Call resource. Nothing is fetched
+automatically: a signed-in user clicks **Fetch full record from
+callBroadcast** on the call page (`POST /recordings/{id}/fetch-record`),
+the receiver GETs
+`/2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json` with the
+account's API key as Basic auth, stores the pretty-printed JSON on the
+call, and fills any still-empty identity/disposition fields from it
+(recording-owned fields are never overwritten).
+
+Because callBroadcast keys are per-account, an administrator stores
+one key per AccountSid under **Integrations** in the UI (with
+`CALLBROADCAST_BASE_URL` set in the environment). Keys are write-only
+— never rendered back — and are used solely as the fetch's Basic-auth
+password. Fetch failures surface as a page message with the HTTP
+status; upstream error bodies are never proxied into the page (they
+can echo account SIDs).
+
 ## Web UI and roles
 
 Sign-in is Google OAuth (see setup above). Authorization is an
@@ -299,8 +350,10 @@ is needed.
 | List/search/filter recordings | ✅ | ✅ |
 | Open a call: metadata, raw RS-Metadata + AMD payload | ✅ | ✅ |
 | Play audio in the browser, download WAVs | ✅ | ✅ |
+| Fetch/refresh the full call record from callBroadcast | ✅ | ✅ |
 | Delete a recording (row + WAV files) | ✅ | ❌ (403) |
 | Add/remove users, grant the admin role | ✅ | ❌ (403) |
+| Store/remove per-account callBroadcast API keys | ✅ | ❌ (403) |
 
 - **Administrator** — the `ADMIN_EMAIL` bootstrap address (always admin,
   cannot be removed in the UI), plus any added user whose role is
@@ -324,8 +377,9 @@ internal/siprecsrv/    The SRS: INVITE/ACK/BYE, SDP offer/answer, RS-Metadata
 internal/rtp/          UDP RTP receiver (G.711 decode, loss tracking), port pool
 internal/recording/    Streaming WAV writer (header patched on close)
 internal/store/        SQLite store: calls, legs, users; SRS Finalizer; AMD merge
+internal/cbclient/     callBroadcast Call-record fetcher (Basic auth, Twilio JSON)
 internal/auth/         Google OAuth, signed sessions, RequireAuth/RequireAdmin
-internal/web/          UI handlers + embedded templates, AMD notify endpoint
+internal/web/          UI handlers + embedded templates, notify endpoints
 ```
 
 One process, two listener families:
@@ -362,6 +416,15 @@ or the merge of both:
 `users` — the UI allowlist: `email` (primary key, normalized),
 `role` (`admin` | `user`), `created_by`, `created_at`, `disabled`.
 
+`cb_accounts` — per-account callBroadcast API keys for on-request
+record fetches: `account_sid` (primary key), `api_key`, `created_by`,
+timestamps. Treat the database file as credential material.
+
+Disposition columns on `calls`: `disp_status`, `disp_duration_sec`,
+`disp_sip_code`, `disp_error_code`, `disp_error_message`,
+`disp_notified_at`, `disp_raw`; fetched-record columns:
+`cb_record_json`, `cb_fetched_at`.
+
 ## Development
 
 ```sh
@@ -386,6 +449,13 @@ What the tests prove (no FreeSWITCH needed):
   authorization (users get 403 on delete and user-admin, 200 on review
   and audio); audio paths outside `RECORDING_DIR` are refused; session
   tampering and CSRF failures are rejected.
+- `internal/store` (dispositions + fetched records) — disposition
+  before/after the recording merges like AMD; a fetched callBroadcast
+  record denormalizes without overwriting recording fields.
+- `internal/cbclient` + the fetch flow — Twilio-shaped Call JSON
+  (string `duration`), per-account Basic auth, upstream errors reduced
+  to a status (never echoing account SIDs), API keys never rendered
+  back into HTML.
 
 ### Live interop test (real FreeSWITCH + mod_siprec)
 

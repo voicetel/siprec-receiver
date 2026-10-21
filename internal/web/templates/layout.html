@@ -39,7 +39,8 @@
 <header class="top">
   <strong>siprec-receiver</strong>
   <a href="/recordings">Recordings</a>
-  {{if .User}}{{if .User.IsAdmin}}<a href="/admin/users">Users</a>{{end}}{{end}}
+  {{if .User}}{{if .User.IsAdmin}}<a href="/admin/users">Users</a>
+  <a href="/admin/integrations">Integrations</a>{{end}}{{end}}
   <span class="spacer"></span>
   {{if .User}}<span>{{.User.Email}} ({{.User.Role}})</span>
   <a href="/auth/logout">Sign out</a>{{end}}

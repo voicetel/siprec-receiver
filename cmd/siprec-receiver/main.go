@@ -52,6 +52,7 @@ type config struct {
 	NotifySecret  string
 	DevAuthEmail  string
 	RetentionDays int
+	CBBaseURL     string
 }
 
 func envOr(key, def string) string {
@@ -106,6 +107,7 @@ func loadConfig() config {
 		NotifySecret:  os.Getenv("NOTIFY_SECRET"),
 		DevAuthEmail:  os.Getenv("DEV_AUTH_EMAIL"),
 		RetentionDays: envInt("RETENTION_DAYS", 0),
+		CBBaseURL:     os.Getenv("CALLBROADCAST_BASE_URL"),
 	}
 }
 
@@ -206,7 +208,7 @@ func main() {
 		DevEmail:      cfg.DevAuthEmail,
 	}, st)
 
-	webSrv, err := web.New(st, authn, cfg.RecordingDir, cfg.NotifySecret)
+	webSrv, err := web.New(st, authn, cfg.RecordingDir, cfg.NotifySecret, cfg.CBBaseURL)
 	if err != nil {
 		log.Fatalf("[main] %v", err)
 	}

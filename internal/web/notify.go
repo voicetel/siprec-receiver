@@ -100,6 +100,81 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "matched": matched})
 }
 
+// handleNotifyDisposition is the final-outcome companion to
+// handleNotifyAMD: POST /api/notify/disposition logs what ultimately
+// happened to the call (the StatusCallback "completed" event's
+// content). Same auth, body shapes, and correlation keys as the AMD
+// endpoint; CallStatus is required instead of AnsweredBy. A
+// disposition carrying AnsweredBy also fills still-empty AMD fields.
+func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request) {
+	if s.NotifySecret == "" {
+		http.Error(w, "notify endpoint disabled (NOTIFY_SECRET not set)", http.StatusServiceUnavailable)
+
+		return
+	}
+
+	if !s.notifyAuthorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+
+		return
+	}
+
+	fields, raw := parseNotifyBody(r, body)
+
+	if fields["CallStatus"] == "" {
+		http.Error(w, "CallStatus is required", http.StatusBadRequest)
+
+		return
+	}
+
+	durationSec, _ := strconv.Atoi(firstNonEmpty(fields["CallDuration"], fields["Duration"]))
+	sipCode, _ := strconv.Atoi(fields["SipResponseCode"])
+
+	n := store.DispositionNotification{
+		CallSid:      fields["CallSid"],
+		AccountSid:   fields["AccountSid"],
+		CallStatus:   fields["CallStatus"],
+		DurationSec:  durationSec,
+		SipCode:      sipCode,
+		ErrorCode:    fields["ErrorCode"],
+		ErrorMessage: fields["ErrorMessage"],
+		AnsweredBy:   fields["AnsweredBy"],
+		From:         firstNonEmpty(fields["From"], fields["Caller"]),
+		To:           firstNonEmpty(fields["To"], fields["Called"]),
+		Direction:    fields["Direction"],
+		SipCallID:    firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
+		FsUUID:       fields["FsUuid"],
+		Raw:          raw,
+	}
+
+	id, matched, err := s.Store.ApplyDisposition(r.Context(), n)
+	if errors.Is(err, store.ErrNoKey) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+
+		return
+	}
+
+	if err != nil {
+		log.Printf("[notify] apply disposition (CallSid=%s SipCallId=%s): %v", n.CallSid, n.SipCallID, err)
+		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[notify] disposition logged id=%d matched=%v status=%s CallSid=%s",
+		id, matched, n.CallStatus, n.CallSid)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "matched": matched})
+}
+
 func (s *Server) notifyAuthorized(r *http.Request) bool {
 	candidates := []string{r.URL.Query().Get("secret")}
 
@@ -146,7 +221,9 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 				"machine_detection_duration": "MachineDetectionDuration",
 				"from":                       "From", "to": "To", "call_status": "CallStatus",
 				"direction": "Direction", "sip_call_id": "SipCallId",
-				"fs_uuid": "FsUuid",
+				"fs_uuid": "FsUuid", "call_duration": "CallDuration",
+				"duration": "Duration", "sip_response_code": "SipResponseCode",
+				"error_code": "ErrorCode", "error_message": "ErrorMessage",
 			}
 			for k, canon := range alias {
 				if v, ok := fields[k]; ok && fields[canon] == "" {

@@ -36,6 +36,12 @@ type fixture struct {
 func newFixture(t *testing.T, devEmail string) *fixture {
 	t.Helper()
 
+	return newFixtureCB(t, devEmail, "")
+}
+
+func newFixtureCB(t *testing.T, devEmail, cbBaseURL string) *fixture {
+	t.Helper()
+
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -51,7 +57,7 @@ func newFixture(t *testing.T, devEmail string) *fixture {
 
 	recDir := t.TempDir()
 
-	ws, err := New(st, authn, recDir, secret)
+	ws, err := New(st, authn, recDir, secret, cbBaseURL)
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
 	}
@@ -279,7 +285,7 @@ func TestUI_AdminAndUserRoles(t *testing.T) {
 	// (admin), so mint the viewer cookie through a throwaway server
 	// bound to the second authenticator, then reuse the cookie jar's
 	// cookie against the main server (same secret, same store).
-	ws2, err := New(f.store, userFixtureAuth, f.recDir, secret)
+	ws2, err := New(f.store, userFixtureAuth, f.recDir, secret, "")
 	if err != nil {
 		t.Fatalf("web.New 2: %v", err)
 	}

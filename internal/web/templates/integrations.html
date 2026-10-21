@@ -1,0 +1,50 @@
+{{template "header" .}}
+<h1>callBroadcast integrations</h1>
+
+<p>To enrich a recording with the full calling record, the receiver
+fetches <code>GET /2010-04-01/Accounts/{AccountSid}/Calls/{CallSid}.json</code>
+from callBroadcast when someone clicks <em>Fetch full record</em> on a
+call page. callBroadcast API keys are per-account, so each account's
+key is stored here. Keys are write-only: they are never displayed
+after saving, and fetches use them only as the Basic-auth password.</p>
+
+<p>callBroadcast base URL (from <code>CALLBROADCAST_BASE_URL</code>):
+{{if .CBBaseURL}}<code>{{.CBBaseURL}}</code>{{else}}<strong>not configured</strong> — fetches are disabled until it is set.{{end}}</p>
+
+<table>
+  <thead>
+    <tr><th>AccountSid</th><th>API key</th><th>Added by</th>
+      <th>Updated</th><th></th></tr>
+  </thead>
+  <tbody>
+    {{range .Accounts}}
+    <tr>
+      <td><code>{{.AccountSid}}</code></td>
+      <td>{{if .APIKey}}•••••••• (set){{else}}—{{end}}</td>
+      <td>{{.CreatedBy}}</td>
+      <td>{{fmtTime .UpdatedAt}}</td>
+      <td>
+        <form method="post" action="/admin/integrations/delete"
+          onsubmit="return confirm('Remove the callBroadcast key for {{.AccountSid}}?')">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="account_sid" value="{{.AccountSid}}">
+          <button class="danger" type="submit">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {{else}}
+    <tr><td colspan="5">No callBroadcast keys configured yet.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+
+<h2>Add / replace key</h2>
+<form method="post" action="/admin/integrations">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="text" name="account_sid" required
+    placeholder="AC0123456789abcdef0123456789abcdef" size="36">
+  <input type="password" name="api_key" required
+    placeholder="API key" size="36" autocomplete="off">
+  <button type="submit">Save key</button>
+</form>
+{{template "footer" .}}

@@ -17,7 +17,35 @@
   <dd>{{if .Call.AMDAnsweredBy}}<span class="badge amd">{{.Call.AMDAnsweredBy}}</span>
       ({{.Call.AMDDurationMs}} ms, call status {{.Call.AMDCallStatus}},
       notified {{fmtTime .Call.AMDNotifiedAt}}){{else}}—{{end}}</dd>
+  <dt>Final disposition</dt>
+  <dd>{{if .Call.DispStatus}}<span class="badge">{{.Call.DispStatus}}</span>
+      call duration {{fmtDur .Call.DispDurationSec}}{{if .Call.DispSipCode}},
+      SIP {{.Call.DispSipCode}}{{end}}{{if .Call.DispErrorCode}},
+      error {{.Call.DispErrorCode}}{{if .Call.DispErrorMessage}} ({{.Call.DispErrorMessage}}){{end}}{{end}},
+      notified {{fmtTime .Call.DispNotifiedAt}}{{else}}—{{end}}</dd>
+  <dt>callBroadcast record</dt>
+  <dd>{{if .Call.CBRecordJSON}}fetched {{fmtTime .Call.CBFetchedAt}}{{else}}not fetched{{end}}
+    {{if .Call.CallSid}}
+    <form method="post" action="/recordings/{{.Call.ID}}/fetch-record" style="display:inline">
+      <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+      <button type="submit">{{if .Call.CBRecordJSON}}Refresh from callBroadcast{{else}}Fetch full record from callBroadcast{{end}}</button>
+    </form>
+    {{end}}</dd>
 </dl>
+
+{{if .Call.CBRecordJSON}}
+<details>
+  <summary>callBroadcast Call record (JSON)</summary>
+  <pre>{{.Call.CBRecordJSON}}</pre>
+</details>
+{{end}}
+
+{{if .Call.DispRaw}}
+<details>
+  <summary>Disposition notification (raw)</summary>
+  <pre>{{.Call.DispRaw}}</pre>
+</details>
+{{end}}
 
 <h2>Audio legs</h2>
 {{range .Call.Legs}}
