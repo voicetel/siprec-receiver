@@ -1,0 +1,49 @@
+{{template "header" .}}
+<h1>Users</h1>
+
+<p>The bootstrap administrator <strong>{{.AdminEmail}}</strong> comes from
+the <code>ADMIN_EMAIL</code> environment variable, always has the admin
+role, and cannot be removed here. Everyone else signs in with Google
+and must be listed below.</p>
+
+<table>
+  <thead>
+    <tr><th>Email</th><th>Role</th><th>Added by</th><th>Added</th>
+      <th>Status</th><th></th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>{{.AdminEmail}}</strong></td><td>admin</td>
+      <td>ADMIN_EMAIL</td><td>—</td><td>active</td><td></td>
+    </tr>
+    {{range .Users}}
+    <tr>
+      <td>{{.Email}}</td>
+      <td>{{.Role}}</td>
+      <td>{{.CreatedBy}}</td>
+      <td>{{fmtTime .CreatedAt}}</td>
+      <td>{{if .Disabled}}disabled{{else}}active{{end}}</td>
+      <td>
+        <form method="post" action="/admin/users/delete"
+          onsubmit="return confirm('Remove {{.Email}}?')">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="email" value="{{.Email}}">
+          <button class="danger" type="submit">Remove</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+
+<h2>Add user</h2>
+<form method="post" action="/admin/users">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="email" name="email" required placeholder="user@example.com" size="32">
+  <select name="role">
+    <option value="user">user (review recordings)</option>
+    <option value="admin">admin (manage recordings + users)</option>
+  </select>
+  <button type="submit">Add</button>
+</form>
+{{template "footer" .}}

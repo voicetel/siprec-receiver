@@ -1,0 +1,60 @@
+{{template "header" .}}
+<h1>Call {{.Call.ID}}</h1>
+
+<dl>
+  <dt>Status</dt><dd><span class="badge {{.Call.Status}}">{{.Call.Status}}</span></dd>
+  <dt>Started</dt><dd>{{fmtTime .Call.StartedAt}}</dd>
+  <dt>Ended</dt><dd>{{fmtTime .Call.EndedAt}}</dd>
+  <dt>Duration</dt><dd>{{fmtDur .Call.DurationSec}}</dd>
+  <dt>From</dt><dd>{{.Call.FromNumber}}{{if .Call.FromURI}} ({{.Call.FromURI}}){{end}}</dd>
+  <dt>To</dt><dd>{{.Call.ToNumber}}</dd>
+  <dt>Direction</dt><dd>{{.Call.Direction}}</dd>
+  <dt>SIP Call-ID</dt><dd><code>{{.Call.SipCallID}}</code></dd>
+  <dt>CallSid</dt><dd><code>{{.Call.CallSid}}</code></dd>
+  <dt>FreeSWITCH UUID</dt><dd><code>{{.Call.FsUUID}}</code></dd>
+  <dt>AccountSid</dt><dd><code>{{.Call.AccountSid}}</code></dd>
+  <dt>AMD disposition</dt>
+  <dd>{{if .Call.AMDAnsweredBy}}<span class="badge amd">{{.Call.AMDAnsweredBy}}</span>
+      ({{.Call.AMDDurationMs}} ms, call status {{.Call.AMDCallStatus}},
+      notified {{fmtTime .Call.AMDNotifiedAt}}){{else}}—{{end}}</dd>
+</dl>
+
+<h2>Audio legs</h2>
+{{range .Call.Legs}}
+<div>
+  <p><strong>{{.Label}}</strong> {{if .Codec}}({{.Codec}}){{end}}
+    {{if .ParticipantAOR}}— {{.ParticipantAOR}}{{end}}
+    — {{fmtDur .DurationSec}}</p>
+  <audio controls preload="none"
+    src="/recordings/{{$.Call.ID}}/legs/{{.ID}}/audio"></audio>
+  <p><a href="/recordings/{{$.Call.ID}}/legs/{{.ID}}/audio?download=1">Download WAV</a></p>
+</div>
+{{else}}
+<p>No recording legs (AMD-only record, or recording not yet finalized).</p>
+{{end}}
+
+{{if .Call.AMDRaw}}
+<details>
+  <summary>AMD notification (raw)</summary>
+  <pre>{{.Call.AMDRaw}}</pre>
+</details>
+{{end}}
+
+{{if .Call.MetadataXML}}
+<details>
+  <summary>RS-Metadata (raw XML)</summary>
+  <pre>{{.Call.MetadataXML}}</pre>
+</details>
+{{end}}
+
+{{if .User.IsAdmin}}
+<h2>Administration</h2>
+<form method="post" action="/recordings/{{.Call.ID}}/delete"
+  onsubmit="return confirm('Delete this recording and its audio files?')">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <button class="danger" type="submit">Delete recording</button>
+</form>
+{{end}}
+
+<p><a href="/recordings">← All recordings</a></p>
+{{template "footer" .}}

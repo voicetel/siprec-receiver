@@ -1,0 +1,11 @@
+{{template "header" .}}
+<h1>Sign in</h1>
+{{if .AuthEnabled}}
+<p>Access to call recordings requires an authorized Google account.</p>
+<p><a class="btn" href="/auth/login">Sign in with Google</a></p>
+{{else}}
+<p>Web sign-in is not configured. Set GOOGLE_CLIENT_ID and
+GOOGLE_CLIENT_SECRET (or DEV_AUTH_EMAIL for local development) and
+restart the service.</p>
+{{end}}
+{{template "footer" .}}

@@ -1,0 +1,46 @@
+{{template "header" .}}
+<h1>Recordings</h1>
+
+<form class="filters" method="get" action="/recordings">
+  <input type="search" name="q" value="{{.Query}}"
+    placeholder="Number, CallSid, Call-ID, FS UUID">
+  <select name="amd">
+    <option value="">Any AMD disposition</option>
+    {{range .AMDs}}<option value="{{.}}" {{if eq . $.AMD}}selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <button type="submit">Filter</button>
+</form>
+
+<p>{{.Total}} call(s)</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Started</th><th>From</th><th>To</th><th>Duration</th>
+      <th>AMD</th><th>Status</th><th>Legs</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Calls}}
+    <tr>
+      <td>{{fmtTime .StartedAt}}</td>
+      <td>{{if .FromNumber}}{{.FromNumber}}{{else}}—{{end}}</td>
+      <td>{{if .ToNumber}}{{.ToNumber}}{{else}}—{{end}}</td>
+      <td>{{fmtDur .DurationSec}}</td>
+      <td>{{if .AMDAnsweredBy}}<span class="badge amd">{{.AMDAnsweredBy}}</span>{{else}}—{{end}}</td>
+      <td><span class="badge {{.Status}}">{{.Status}}</span></td>
+      <td>{{.LegCount}}</td>
+      <td><a href="/recordings/{{.ID}}">View</a></td>
+    </tr>
+    {{else}}
+    <tr><td colspan="8">No calls match.</td></tr>
+    {{end}}
+  </tbody>
+</table>
+
+<div class="pager">
+  {{if gt .Page 1}}<a href="/recordings?page={{subtract .Page 1}}&q={{.Query}}&amd={{.AMD}}">← Prev</a>{{end}}
+  <span>Page {{.Page}} of {{.Pages}}</span>
+  {{if lt .Page .Pages}}<a href="/recordings?page={{add .Page 1}}&q={{.Query}}&amd={{.AMD}}">Next →</a>{{end}}
+</div>
+{{template "footer" .}}

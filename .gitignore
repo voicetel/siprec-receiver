@@ -1,0 +1,7 @@
+data/
+*.db
+*.db-wal
+*.db-shm
+/recordings/
+*.wav
+.DS_Store
