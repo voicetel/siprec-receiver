@@ -291,7 +291,12 @@ func main() {
 		log.Printf("[main] orphan recovery: adopted %d recording(s) from %s", n, cfg.RecordingDir)
 	}
 
-	go maintenanceLoop(ctx, st, cfg.RetentionDays)
+	var maintenance sync.WaitGroup
+	maintenance.Add(1)
+	go func() {
+		defer maintenance.Done()
+		maintenanceLoop(ctx, st, cfg.RetentionDays)
+	}()
 
 	pool := rtp.NewPortPool(cfg.RTPPortMin, cfg.RTPPortMax)
 
@@ -390,6 +395,7 @@ func main() {
 
 	base.Shutdown()
 	wg.Wait()
+	maintenance.Wait()
 
 	if err := st.Close(); err != nil {
 		log.Printf("[main] store close: %v", err)

@@ -105,6 +105,10 @@ type sharedState struct {
 	mu         sync.Mutex
 	sessions   map[string]*session
 	reaperOnce sync.Once
+	stopping   bool
+	stop       chan struct{}
+	work       sync.WaitGroup // handlers and reaper, admitted under mu
+	shutdownMu sync.Mutex     // concurrent Shutdown callers join the same drain
 }
 
 // Server is one SIP listener of an SRS family. Create the first with
@@ -136,6 +140,7 @@ func New(localIP, recordingDir string, portPool *rtp.PortPool) *Server {
 		idleTimeout:  defaultIdleTimeout,
 		reaperTick:   reaperInterval,
 		sessions:     make(map[string]*session),
+		stop:         make(chan struct{}),
 	}
 
 	return &Server{
@@ -438,8 +443,14 @@ func contactFor(localIP, transport, addr string) string {
 // from any clone of the family.
 func (s *Server) Shutdown() {
 	sh := s.shared
+	sh.shutdownMu.Lock()
+	defer sh.shutdownMu.Unlock()
 
 	sh.mu.Lock()
+	if !sh.stopping {
+		sh.stopping = true
+		close(sh.stop)
+	}
 
 	victims := make([]*session, 0, len(sh.sessions))
 	for id, sess := range sh.sessions {
@@ -456,16 +467,34 @@ func (s *Server) Shutdown() {
 	for _, sess := range victims {
 		sh.finalizeSession(context.Background(), sess)
 	}
+	sh.work.Wait()
 
 	if len(victims) > 0 {
 		log.Printf("[siprecsrv] shutdown: finalized %d active session(s)", len(victims))
 	}
 }
 
+// Admission and shutdown use the same lock: no Add can race a Wait
+// after shutdown starts, even when no sessions remain in the map.
+func (sh *sharedState) beginWork() bool {
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if sh.stopping {
+		return false
+	}
+	sh.work.Add(1)
+	return true
+}
+
 // startReaper launches the family idle-session reaper once.
 func (sh *sharedState) startReaper(ctx context.Context) {
 	sh.reaperOnce.Do(func() {
-		go sh.reaperLoop(ctx)
+		if sh.beginWork() {
+			go func() {
+				defer sh.work.Done()
+				sh.reaperLoop(ctx)
+			}()
+		}
 	})
 }
 
@@ -480,6 +509,8 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-sh.stop:
 			return
 		case now := <-ticker.C:
 			var victims []*session
@@ -642,6 +673,11 @@ func (s *Server) onAck(req *sip.Request, _ sip.ServerTransaction) {
 }
 
 func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
+	if !s.shared.beginWork() {
+		s.respond(req, tx, sip.StatusServiceUnavailable, "shutting down", nil, "")
+		return
+	}
+	defer s.shared.work.Done()
 	defer func() {
 		if rec := recover(); rec != nil {
 			log.Printf("[siprecsrv] BYE handler panic: %v", rec)
@@ -662,6 +698,10 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
+	pending := ok && sess.pending
+	if pending {
+		sess.cancelled = true
+	}
 	if ok {
 		delete(sh.sessions, callID)
 	}
@@ -677,14 +717,10 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	if sess.pending {
+	if pending {
 		// The INVITE is still being built; flag it and let the
 		// builder roll back (it may already have finished — the
 		// cancelled flag is checked under the same lock).
-		sh.mu.Lock()
-		sess.cancelled = true
-		sh.mu.Unlock()
-
 		return
 	}
 
@@ -696,6 +732,11 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
+	if !s.shared.beginWork() {
+		s.respond(req, tx, sip.StatusServiceUnavailable, "shutting down", nil, "")
+		return
+	}
+	defer s.shared.work.Done()
 	// A handler panic must not kill every other recording.
 	defer func() {
 		if rec := recover(); rec != nil {
@@ -941,9 +982,16 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 			callID, legLabel, port, m.CodecName, wavPath)
 	}
 
-	sess.legs = legs
-
 	sh.mu.Lock()
+	sess.legs = legs
+	answer, err := BuildAnswerSDPWithVersion(sh.localIP, parsed, answerPorts, 1)
+	if err != nil {
+		sh.mu.Unlock()
+		log.Printf("[siprecsrv] %s: build answer: %v", callID, err)
+		rollback()
+		s.respond(req, tx, sip.StatusInternalServerError, "sdp build failed", nil, "")
+		return
+	}
 	if sess.cancelled {
 		// A BYE (or shutdown) landed while we were building. The
 		// recording exists; finalize it like any ended dialog.
@@ -959,17 +1007,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	sess.pending = false
 	sess.answerVer++
-	answerVer := sess.answerVer
 	sh.mu.Unlock()
-
-	answer, err := BuildAnswerSDPWithVersion(sh.localIP, parsed, answerPorts, answerVer)
-	if err != nil {
-		log.Printf("[siprecsrv] %s: build answer: %v", callID, err)
-		rollback()
-		s.respond(req, tx, sip.StatusInternalServerError, "sdp build failed", nil, "")
-
-		return
-	}
 
 	s.respond(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp")
 }
