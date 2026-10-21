@@ -291,9 +291,7 @@ func main() {
 		log.Printf("[main] orphan recovery: adopted %d recording(s) from %s", n, cfg.RecordingDir)
 	}
 
-	if cfg.RetentionDays > 0 {
-		go retentionLoop(ctx, st, cfg.RetentionDays)
-	}
+	go maintenanceLoop(ctx, st, cfg.RetentionDays)
 
 	pool := rtp.NewPortPool(cfg.RTPPortMin, cfg.RTPPortMax)
 
@@ -348,7 +346,7 @@ func main() {
 		DevEmail:      cfg.DevAuthEmail,
 	}, st)
 
-	webSrv, err := web.New(st, authn, cfg.RecordingDir, cfg.NotifySecret, cfg.VoiceMLBaseURL)
+	webSrv, err := web.New(st, authn, cfg.RecordingDir, cfg.NotifySecret, cfg.VoiceMLBaseURL, cfg.RetentionDays)
 	if err != nil {
 		log.Fatalf("[main] %v", err)
 	}
@@ -400,35 +398,50 @@ func main() {
 	log.Printf("[main] stopped")
 }
 
-// retentionLoop deletes calls (rows + WAV files) that started more
-// than days ago: once at startup, then daily. Disabled when days <= 0
-// (main only starts it then).
-func retentionLoop(ctx context.Context, st *store.Store, days int) {
-	sweep := func() {
-		cutoff := time.Now().AddDate(0, 0, -days)
-
-		paths, n, err := st.DeleteCallsStartedBefore(ctx, cutoff)
+// maintenanceLoop is the application's database/recording custodian.
+// It runs at startup and every 15 minutes: it resolves the effective
+// retention period (an admin-UI setting wins over the RETENTION_DAYS
+// environment default once saved), purges expired calls with their
+// WAV files, checkpoints the SQLite WAL, lets SQLite optimize its
+// query planner, and vacuums when free pages exceed 20% of the file.
+func maintenanceLoop(ctx context.Context, st *store.Store, envRetentionDays int) {
+	run := func() {
+		days, fromUI, err := st.EffectiveRetentionDays(ctx, envRetentionDays)
 		if err != nil {
-			log.Printf("[retention] sweep: %v", err)
+			log.Printf("[maintenance] resolve retention: %v", err)
+		} else if days > 0 {
+			calls, files, err := st.PurgeExpired(ctx, days)
+			if err != nil {
+				log.Printf("[maintenance] purge: %v", err)
+			} else if calls > 0 {
+				source := "RETENTION_DAYS"
+				if fromUI {
+					source = "admin setting"
+				}
 
-			return
-		}
-
-		for _, p := range paths {
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-				log.Printf("[retention] remove %s: %v", p, err)
+				log.Printf("[maintenance] purged %d expired call(s), %d file(s) (retention %d day(s), %s)",
+					calls, files, days, source)
 			}
 		}
 
-		if n > 0 {
-			log.Printf("[retention] deleted %d call(s) started before %s (%d file(s))",
-				n, cutoff.Format("2006-01-02"), len(paths))
+		if err := st.Checkpoint(ctx); err != nil {
+			log.Printf("[maintenance] wal checkpoint: %v", err)
+		}
+
+		if err := st.Optimize(ctx); err != nil {
+			log.Printf("[maintenance] sqlite optimize: %v", err)
+		}
+
+		if did, err := st.VacuumIfNeeded(ctx, 0.2); err != nil {
+			log.Printf("[maintenance] vacuum check: %v", err)
+		} else if did {
+			log.Printf("[maintenance] vacuumed database (free pages exceeded 20%%)")
 		}
 	}
 
-	sweep()
+	run()
 
-	ticker := time.NewTicker(24 * time.Hour)
+	ticker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
 
 	for {
@@ -436,7 +449,7 @@ func retentionLoop(ctx context.Context, st *store.Store, days int) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sweep()
+			run()
 		}
 	}
 }

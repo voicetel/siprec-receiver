@@ -58,7 +58,7 @@ func newFixtureVM(t *testing.T, devEmail, voicemlBaseURL string) *fixture {
 
 	recDir := t.TempDir()
 
-	ws, err := New(st, authn, recDir, secret, voicemlBaseURL)
+	ws, err := New(st, authn, recDir, secret, voicemlBaseURL, 0)
 	if err != nil {
 		t.Fatalf("web.New: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestUI_AdminAndUserRoles(t *testing.T) {
 	// (admin), so mint the viewer cookie through a throwaway server
 	// bound to the second authenticator, then reuse the cookie jar's
 	// cookie against the main server (same secret, same store).
-	ws2, err := New(f.store, userFixtureAuth, f.recDir, secret, "")
+	ws2, err := New(f.store, userFixtureAuth, f.recDir, secret, "", 0)
 	if err != nil {
 		t.Fatalf("web.New 2: %v", err)
 	}

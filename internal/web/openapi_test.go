@@ -54,6 +54,7 @@ func TestOpenAPISpecServedAndComplete(t *testing.T) {
 		"/recordings/{id}/fetch-record", "/recordings/{id}/delete",
 		"/admin/users", "/admin/users/delete", "/admin/users/revoke",
 		"/admin/audit", "/admin/integrations", "/admin/integrations/delete",
+		"/admin/settings", "/admin/settings/purge",
 	}
 	for _, p := range wantPaths {
 		if _, ok := doc.Paths[p]; !ok {

@@ -129,7 +129,7 @@ All configuration is environment variables (see also `.env.example`).
 | `SESSION_SECRET` | ephemeral | HMAC secret for session cookies (at least 32 bytes when set); set a stable random value in production or every restart signs everyone out |
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
-| `RETENTION_DAYS` | `0` (disabled) | Delete calls (rows + WAV files) that started more than this many days ago; swept at startup, then daily |
+| `RETENTION_DAYS` | `0` (disabled) | Initial retention default. An administrator can override it under **Settings**; once saved there, the UI value wins and applies on the maintenance timer’s next run |
 | `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations) |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
 
@@ -384,6 +384,7 @@ is needed.
 | Add/remove users, grant the admin role | ✅ | ❌ (403) |
 | Revoke a user's sessions (sign them out everywhere) | ✅ | ❌ (403) |
 | Store/remove per-account VoiceML API keys | ✅ | ❌ (403) |
+| Configure retention and purge expired calls | ✅ | ❌ (403) |
 | View the audit log | ✅ | ❌ (403) |
 
 - **Administrator** — the `ADMIN_EMAIL` bootstrap address (always admin,
@@ -400,16 +401,21 @@ own. With `GOOGLE_HOSTED_DOMAIN` set, sign-in additionally requires
 a Workspace account from that domain. **Revoke sessions** bumps a
 per-user epoch that invalidates every outstanding cookie at once.
 Every administrative action (deletions, user and key changes,
-session revocations, record fetches) is written to the **Audit log**
-(who, what, when) and shown to administrators.
+session revocations, record fetches, retention changes, and manual
+purges) is written to the **Audit log** (who, what, when) and shown
+to administrators.
 
 There is deliberately **no per-tenant scoping**: every signed-in
 reviewer sees every recording. The allowlist is the access model —
 add exactly the people who may review all calls.
 
-The recordings list filters by free text (number, CallSid, SIP
-Call-ID, FreeSWITCH UUID) and by AMD disposition, 50 calls per page.
-Each call's page shows every stored field, one audio player + download
+The recordings list is a call search: filter by free text (number,
+CallSid, SIP Call-ID, FreeSWITCH UUID, disposition), caller number,
+called number, start-date range, final disposition, and AMD
+disposition. Results are newest first, 50 per page, and every row
+retains its **time, From, To, disposition, and AMD disposition**, so
+a search can be scanned without opening each call. Each call's page
+shows every stored field, one audio player + download
 link per leg, and collapsible raw AMD/metadata payloads. Anonymous
 requests redirect to the sign-in page; the only unauthenticated
 routes are `GET /healthz`, the OpenAPI spec and docs (below), the
@@ -502,6 +508,10 @@ UI deletes its rows and files.
 `audit_log` — administrative actions: `actor`, `action`, `target`,
 `detail`, `created_at`.
 
+`settings` — administrator-managed application settings:
+`key`, `value`, `updated_at`. It stores the retention period and the
+maintenance timer's last-purge result.
+
 `voiceml_accounts` — per-account VoiceML API keys for on-request
 record fetches: `account_sid` (primary key), `api_key`, `created_by`,
 timestamps. Treat the database file as credential material.
@@ -578,9 +588,14 @@ set `DOCKER="sudo docker"` if your user is not in the docker group.
 - Run one instance per FreeSWITCH node (or centrally, if
   `SIPREC_LOCAL_IP` is reachable from every FreeSWITCH): there is no
   cross-instance state, and recordings land on the local disk + SQLite.
-- Set `RETENTION_DAYS` (or your own external rotation) — recordings
-  otherwise accumulate forever. The built-in sweep deletes rows and
-  WAV files together at startup and then daily.
+- Configure recording retention under **Admin → Settings** (or set
+  the initial `RETENTION_DAYS` default) — recordings otherwise
+  accumulate forever. The application maintenance timer runs at
+  startup and every 15 minutes: it purges calls/recordings past the
+  retention period, checkpoints the SQLite WAL, runs
+  `PRAGMA optimize`, and vacuums when free pages exceed 20%. The
+  settings page shows the last purge and database size and offers a
+  manual purge. Audit-log entries are not retention-purged.
 - A `Dockerfile` is included (`docker build -t siprec-receiver .`);
   mount a volume at `/data` for the database + recordings. Container
   networking caveat: the SDP answer advertises `SIPREC_LOCAL_IP`, so

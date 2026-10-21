@@ -332,8 +332,10 @@ paths:
       summary: List calls and recordings
       description: |
         The recordings list: every call (recorded, AMD/disposition-only, or
-        merged), newest first, 50 per page. Filter by free text (number,
-        CallSid, SIP Call-ID, FreeSWITCH UUID) and by AMD disposition.
+        merged), newest first, 50 per page. Search independently by caller
+        number, called number, start-date range, final disposition, and AMD
+        disposition. Every result row retains its time, From, To, final
+        disposition, and AMD disposition.
       security:
         - SessionCookie: []
       parameters:
@@ -344,6 +346,42 @@ paths:
           schema:
             type: string
           example: '12125550100'
+        - name: from_number
+          in: query
+          required: false
+          description: Caller-number substring filter matching the retained From field.
+          schema:
+            type: string
+          example: '1212555'
+        - name: to_number
+          in: query
+          required: false
+          description: Called-number substring filter matching the retained To field.
+          schema:
+            type: string
+          example: '1313555'
+        - name: start_date
+          in: query
+          required: false
+          description: Earliest call start date to include, interpreted at 00:00 UTC.
+          schema:
+            type: string
+            format: date
+          example: '2026-01-01'
+        - name: end_date
+          in: query
+          required: false
+          description: Latest call start date to include, through 23:59:59 UTC on that date.
+          schema:
+            type: string
+            format: date
+          example: '2026-01-31'
+        - name: disposition
+          in: query
+          required: false
+          description: Filter to one final call disposition retained on each result row.
+          schema:
+            $ref: '#/components/schemas/CallDisposition'
         - name: amd
           in: query
           required: false
@@ -701,6 +739,71 @@ paths:
               $ref: '#/components/headers/Location'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /admin/settings:
+    get:
+      tags:
+        - Admin
+      operationId: getAdminSettings
+      summary: Retention and maintenance settings page (admin)
+      description: Shows the effective recording-retention period and its source, the last purge run, retained-call count, and SQLite size/page statistics. Administrators only.
+      security:
+        - SessionCookie: []
+      responses:
+        '200':
+          description: The retention settings HTML page.
+          content:
+            text/html:
+              schema:
+                $ref: '#/components/schemas/HTMLPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Admin
+      operationId: postAdminSettings
+      summary: Save the retention period (admin)
+      description: Stores the number of days to retain calls and recordings. Once saved, this value overrides the RETENTION_DAYS environment default and is read by the maintenance timer on every run. Zero disables purging. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The retention settings form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/SettingsForm'
+      responses:
+        '303':
+          description: Retention saved; redirect back to the settings page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /admin/settings/purge:
+    post:
+      tags:
+        - Admin
+      operationId: postAdminSettingsPurge
+      summary: Purge expired calls immediately (admin)
+      description: Runs the retention purge now instead of waiting for the maintenance timer, deleting expired call rows and WAV files and recording the result in settings and the audit log.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: CSRF form for the manual purge action.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/CSRFForm'
+      responses:
+        '303':
+          description: Purge attempted; redirect back to settings with the removal count or the disabled-retention explanation.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 components:
   securitySchemes:
     NotifySecret:
@@ -841,6 +944,19 @@ components:
         - screened_ivr
         - disconnected
       example: machine_end_beep
+    CallDisposition:
+      type: string
+      description: Final call status values used to filter recordings by their retained disposition.
+      enum:
+        - queued
+        - ringing
+        - in-progress
+        - completed
+        - busy
+        - failed
+        - no-answer
+        - canceled
+      example: completed
     AMDNotifyRequest:
       type: object
       description: |
@@ -954,6 +1070,21 @@ components:
           type: boolean
           description: True when an existing recording/notification row was updated; false when a new AMD/disposition-only row was created.
           example: true
+    SettingsForm:
+      type: object
+      description: The recording-retention settings form saved by an administrator.
+      required:
+        - retention_days
+        - csrf_token
+      properties:
+        retention_days:
+          type: integer
+          description: Days to retain calls and their WAV files before the maintenance timer purges them; zero disables purging.
+          minimum: 0
+          maximum: 3650
+          example: 90
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
     CSRFForm:
       type: object
       description: A form carrying only the per-session CSRF token.

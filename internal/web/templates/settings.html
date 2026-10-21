@@ -1,0 +1,46 @@
+{{template "header" .}}
+<h1>Settings</h1>
+
+<h2>Recording retention</h2>
+
+<p>The maintenance timer runs when the application starts and then every
+15 minutes. On each run it resolves the retention period below, deletes
+calls that started more than that many days ago — database rows and WAV
+files together — then maintains the SQLite database (WAL checkpoint,
+query-planner optimize, and a vacuum when free pages exceed 20%).</p>
+
+<p>Current setting: <strong>{{if gt .RetentionDays 0}}purge calls older than
+{{.RetentionDays}} day(s){{else}}disabled (keep recordings indefinitely){{end}}</strong>
+{{if .RetentionFromUI}}(saved here; overrides the environment default){{else}}(from the
+<code>RETENTION_DAYS</code> environment default of {{.RetentionEnvDefault}} day(s);
+saving below makes the UI value authoritative){{end}}.</p>
+
+<form method="post" action="/admin/settings">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <label>Retention days
+    <input type="number" name="retention_days" min="0" max="3650" step="1"
+      value="{{.RetentionDays}}" required>
+  </label>
+  <button type="submit">Save retention setting</button>
+</form>
+
+<p>Last purge: {{if .LastPurgeAt.IsZero}}never{{else}}{{fmtTime .LastPurgeAt}}
+— {{.LastPurgeCalls}} call(s), {{.LastPurgeFiles}} file(s){{end}}.</p>
+
+<form method="post" action="/admin/settings/purge"
+  onsubmit="return confirm('Purge all calls older than the retention period now?')">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <button class="danger" type="submit" {{if le .RetentionDays 0}}disabled{{end}}>Purge expired calls now</button>
+</form>
+
+<h2>Database</h2>
+
+<dl>
+  <dt>Calls retained</dt><dd>{{.TotalCalls}}</dd>
+  <dt>Database size</dt><dd>{{fmtBytes .DBStats.ApproxBytes}}</dd>
+  <dt>Pages</dt><dd>{{.DBStats.PageCount}} total, {{.DBStats.Freelist}} free ({{.DBStats.PageSize}} bytes each)</dd>
+</dl>
+
+<p>Deleting recordings here is permanent. The audit log is not purged by
+retention, so the record of administrative actions remains available.</p>
+{{template "footer" .}}

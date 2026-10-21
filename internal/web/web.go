@@ -26,11 +26,12 @@ import (
 
 // Server bundles the HTTP handlers' dependencies.
 type Server struct {
-	Store          *store.Store
-	Auth           *auth.Authenticator
-	RecordingDir   string
-	NotifySecret   string
-	VoiceMLBaseURL string // VoiceML base URL for on-request record fetches; "" disables
+	Store               *store.Store
+	Auth                *auth.Authenticator
+	RecordingDir        string
+	NotifySecret        string
+	VoiceMLBaseURL      string // VoiceML base URL for on-request record fetches; "" disables
+	RetentionEnvDefault int    // RETENTION_DAYS fallback until an admin saves a setting
 
 	secretQueryWarn sync.Once
 	tmpl            *template.Template
@@ -67,8 +68,15 @@ var amdDispositions = []string{
 	"disconnected",
 }
 
+// callDispositions is the final-outcome vocabulary used by the
+// recordings search (Twilio/VoiceML CallStatus values).
+var callDispositions = []string{
+	"queued", "ringing", "in-progress", "completed", "busy", "failed",
+	"no-answer", "canceled",
+}
+
 // New builds a Server and parses the embedded templates.
-func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, voicemlBaseURL string) (*Server, error) {
+func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, voicemlBaseURL string, retentionEnvDefault int) (*Server, error) {
 	tmpl, err := template.New("").Funcs(template.FuncMap{
 		"fmtTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -86,18 +94,33 @@ func New(st *store.Store, a *auth.Authenticator, recordingDir, notifySecret, voi
 
 			return fmt.Sprintf("%dm %02ds", sec/60, sec%60)
 		},
+		"fmtBytes": func(n int64) string {
+			const unit = 1024
+			if n < unit {
+				return fmt.Sprintf("%d B", n)
+			}
+
+			div, exp := int64(unit), 0
+			for x := n / unit; x >= unit; x /= unit {
+				div *= unit
+				exp++
+			}
+
+			return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+		},
 	}).ParseFS(templatesFS, "templates/*.html")
 	if err != nil {
 		return nil, fmt.Errorf("web: parse templates: %w", err)
 	}
 
 	return &Server{
-		Store:          st,
-		Auth:           a,
-		RecordingDir:   recordingDir,
-		NotifySecret:   notifySecret,
-		VoiceMLBaseURL: strings.TrimRight(strings.TrimSpace(voicemlBaseURL), "/"),
-		tmpl:           tmpl,
+		Store:               st,
+		Auth:                a,
+		RecordingDir:        recordingDir,
+		NotifySecret:        notifySecret,
+		VoiceMLBaseURL:      strings.TrimRight(strings.TrimSpace(voicemlBaseURL), "/"),
+		RetentionEnvDefault: retentionEnvDefault,
+		tmpl:                tmpl,
 	}, nil
 }
 
@@ -161,6 +184,12 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrationUpsert)))
 	authed.Handle("POST /admin/integrations/delete",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleIntegrationDelete)))
+	authed.Handle("GET /admin/settings",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleSettings)))
+	authed.Handle("POST /admin/settings",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleSettingsSave)))
+	authed.Handle("POST /admin/settings/purge",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleSettingsPurge)))
 
 	mux.Handle("/", s.Auth.RequireAuth(authed))
 
@@ -222,13 +251,20 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 
 type listData struct {
 	baseData
-	Calls []store.Call
-	Total int
-	Page  int
-	Pages int
-	Query string
-	AMD   string
-	AMDs  []string
+	Calls        []store.Call
+	Total        int
+	Page         int
+	Pages        int
+	Query        string
+	From         string
+	To           string
+	StartDate    string
+	EndDate      string
+	AMD          string
+	Disposition  string
+	AMDs         []string
+	Dispositions []string
+	FilterQuery  string
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -239,11 +275,28 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		page = 1
 	}
 
+	q := r.URL.Query()
+	startDate := strings.TrimSpace(q.Get("start_date"))
+	endDate := strings.TrimSpace(q.Get("end_date"))
+
 	f := store.ListFilter{
-		Query:  strings.TrimSpace(r.URL.Query().Get("q")),
-		AMD:    r.URL.Query().Get("amd"),
-		Limit:  pageSize,
-		Offset: (page - 1) * pageSize,
+		Query:       strings.TrimSpace(q.Get("q")),
+		From:        strings.TrimSpace(q.Get("from_number")),
+		To:          strings.TrimSpace(q.Get("to_number")),
+		AMD:         q.Get("amd"),
+		Disposition: q.Get("disposition"),
+		Limit:       pageSize,
+		Offset:      (page - 1) * pageSize,
+	}
+
+	if t, err := time.ParseInLocation("2006-01-02", startDate, time.UTC); err == nil {
+		f.StartedAfter = t
+	}
+
+	if t, err := time.ParseInLocation("2006-01-02", endDate, time.UTC); err == nil {
+		// The selected end date is inclusive: filter before the
+		// following midnight.
+		f.StartedBefore = t.AddDate(0, 0, 1)
 	}
 
 	calls, total, err := s.Store.ListCalls(r.Context(), f)
@@ -259,15 +312,33 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		pages = 1
 	}
 
+	filterValues := url.Values{}
+	for key, value := range map[string]string{
+		"q": f.Query, "from_number": f.From, "to_number": f.To,
+		"start_date": startDate, "end_date": endDate,
+		"amd": f.AMD, "disposition": f.Disposition,
+	} {
+		if value != "" {
+			filterValues.Set(key, value)
+		}
+	}
+
 	s.render(w, "recordings.html", listData{
-		baseData: s.base(r),
-		Calls:    calls,
-		Total:    total,
-		Page:     page,
-		Pages:    pages,
-		Query:    f.Query,
-		AMD:      f.AMD,
-		AMDs:     amdDispositions,
+		baseData:     s.base(r),
+		Calls:        calls,
+		Total:        total,
+		Page:         page,
+		Pages:        pages,
+		Query:        f.Query,
+		From:         f.From,
+		To:           f.To,
+		StartDate:    startDate,
+		EndDate:      endDate,
+		AMD:          f.AMD,
+		Disposition:  f.Disposition,
+		AMDs:         amdDispositions,
+		Dispositions: callDispositions,
+		FilterQuery:  filterValues.Encode(),
 	})
 }
 
@@ -725,4 +796,124 @@ func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request)
 	log.Printf("[web] admin %q deleted VoiceML key for account %q", user.Email, accountSid) // #nosec G706 -- quoted values
 	s.audit(r, "voicemlkey.delete", accountSid, "")
 	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+deleted", http.StatusSeeOther)
+}
+
+// --- Admin: retention & maintenance settings ---------------------------------
+
+type settingsData struct {
+	baseData
+	RetentionDays       int
+	RetentionFromUI     bool
+	RetentionEnvDefault int
+	LastPurgeAt         time.Time
+	LastPurgeCalls      int
+	LastPurgeFiles      int
+	TotalCalls          int
+	DBStats             store.DBStats
+}
+
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	days, fromUI, err := s.Store.EffectiveRetentionDays(r.Context(), s.RetentionEnvDefault)
+	if err != nil {
+		log.Printf("[web] retention setting: %v", err)
+		http.Error(w, "failed to load settings", http.StatusInternalServerError)
+
+		return
+	}
+
+	stats, err := s.Store.DBStats(r.Context())
+	if err != nil {
+		log.Printf("[web] db stats: %v", err)
+		http.Error(w, "failed to load database stats", http.StatusInternalServerError)
+
+		return
+	}
+
+	_, total, err := s.Store.ListCalls(r.Context(), store.ListFilter{Limit: 1})
+	if err != nil {
+		log.Printf("[web] settings call count: %v", err)
+		http.Error(w, "failed to load settings", http.StatusInternalServerError)
+
+		return
+	}
+
+	lastAt, lastCalls, lastFiles := s.Store.LastPurge(r.Context())
+
+	s.render(w, "settings.html", settingsData{
+		baseData:            s.base(r),
+		RetentionDays:       days,
+		RetentionFromUI:     fromUI,
+		RetentionEnvDefault: s.RetentionEnvDefault,
+		LastPurgeAt:         lastAt,
+		LastPurgeCalls:      lastCalls,
+		LastPurgeFiles:      lastFiles,
+		TotalCalls:          total,
+		DBStats:             stats,
+	})
+}
+
+func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	days, err := strconv.Atoi(strings.TrimSpace(r.FormValue("retention_days")))
+	if err != nil || days < 0 || days > 3650 {
+		http.Redirect(w, r, "/admin/settings?msg=Retention+days+must+be+a+whole+number+from+0+to+3650", http.StatusSeeOther)
+
+		return
+	}
+
+	if err := s.Store.SetSetting(r.Context(), store.SettingRetentionDays, strconv.Itoa(days)); err != nil {
+		log.Printf("[web] save retention setting: %v", err)
+		http.Error(w, "failed to save settings", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] admin %q set retention_days=%d", user.Email, days) // #nosec G706 -- quoted values
+	s.audit(r, "settings.retention", store.SettingRetentionDays, fmt.Sprintf("days=%d", days))
+	http.Redirect(w, r, "/admin/settings?msg=Retention+setting+saved", http.StatusSeeOther)
+}
+
+func (s *Server) handleSettingsPurge(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	days, _, err := s.Store.EffectiveRetentionDays(r.Context(), s.RetentionEnvDefault)
+	if err != nil {
+		log.Printf("[web] purge retention setting: %v", err)
+		http.Error(w, "failed to resolve retention setting", http.StatusInternalServerError)
+
+		return
+	}
+
+	if days <= 0 {
+		http.Redirect(w, r, "/admin/settings?msg=Retention+is+disabled+%280+days%29%3B+nothing+was+purged", http.StatusSeeOther)
+
+		return
+	}
+
+	calls, files, err := s.Store.PurgeExpired(r.Context(), days)
+	if err != nil {
+		log.Printf("[web] manual purge: %v", err)
+		http.Error(w, "purge failed", http.StatusInternalServerError)
+
+		return
+	}
+
+	log.Printf("[web] admin %q manually purged %d call(s), %d file(s) at retention %d day(s)",
+		user.Email, calls, files, days) // #nosec G706 -- quoted values
+	s.audit(r, "maintenance.purge", "expired-calls",
+		fmt.Sprintf("manual days=%d calls=%d files=%d", days, calls, files))
+
+	msg := fmt.Sprintf("Purged %d expired call(s) and %d file(s)", calls, files)
+	http.Redirect(w, r, "/admin/settings?msg="+url.QueryEscape(msg), http.StatusSeeOther)
 }

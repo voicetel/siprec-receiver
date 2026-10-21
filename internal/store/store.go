@@ -306,6 +306,11 @@ CREATE TABLE IF NOT EXISTS voiceml_accounts (
 	created_at  INTEGER NOT NULL,
 	updated_at  INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+	key        TEXT PRIMARY KEY,
+	value      TEXT NOT NULL DEFAULT '',
+	updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit_log (
 	id         INTEGER PRIMARY KEY AUTOINCREMENT,
 	actor      TEXT NOT NULL,
@@ -731,12 +736,18 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?);`,
 	return newID, false, nil
 }
 
-// ListFilter narrows ListCalls.
+// ListFilter narrows ListCalls. Empty fields match everything.
+// StartedBefore is exclusive; StartedAfter is inclusive.
 type ListFilter struct {
-	Query  string // substring match on numbers / SIDs / UUID
-	AMD    string // exact amd_answered_by match when non-empty
-	Limit  int
-	Offset int
+	Query         string // substring match on numbers / SIDs / UUID / dispositions
+	From          string // substring match on from_number
+	To            string // substring match on to_number
+	AMD           string // exact amd_answered_by match when non-empty
+	Disposition   string // exact disp_status match when non-empty
+	StartedAfter  time.Time
+	StartedBefore time.Time
+	Limit         int
+	Offset        int
 }
 
 // ListCalls returns calls newest-first plus the total match count.
@@ -747,14 +758,40 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 	if f.Query != "" {
 		where += ` AND (from_number LIKE ? ESCAPE '\' OR to_number LIKE ? ESCAPE '\'
 			OR call_sid LIKE ? ESCAPE '\' OR sip_call_id LIKE ? ESCAPE '\'
-			OR fs_uuid LIKE ? ESCAPE '\')`
+			OR fs_uuid LIKE ? ESCAPE '\' OR account_sid LIKE ? ESCAPE '\'
+			OR amd_answered_by LIKE ? ESCAPE '\' OR disp_status LIKE ? ESCAPE '\')`
 		like := "%" + escapeLike(f.Query) + "%"
-		args = append(args, like, like, like, like, like)
+		args = append(args, like, like, like, like, like, like, like, like)
+	}
+
+	if f.From != "" {
+		where += ` AND from_number LIKE ? ESCAPE '\'`
+		args = append(args, "%"+escapeLike(f.From)+"%")
+	}
+
+	if f.To != "" {
+		where += ` AND to_number LIKE ? ESCAPE '\'`
+		args = append(args, "%"+escapeLike(f.To)+"%")
 	}
 
 	if f.AMD != "" {
 		where += ` AND amd_answered_by = ?`
 		args = append(args, f.AMD)
+	}
+
+	if f.Disposition != "" {
+		where += ` AND disp_status = ?`
+		args = append(args, f.Disposition)
+	}
+
+	if !f.StartedAfter.IsZero() {
+		where += ` AND started_at >= ?`
+		args = append(args, millis(f.StartedAfter))
+	}
+
+	if !f.StartedBefore.IsZero() {
+		where += ` AND started_at < ?`
+		args = append(args, millis(f.StartedBefore))
 	}
 
 	var total int
