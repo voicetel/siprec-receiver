@@ -237,9 +237,13 @@ func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []in
 
 	// media-level: one block per offered stream
 	for i, m := range offer.Media {
+		port := localPorts[i]
+		if m.Port == 0 {
+			port = 0
+		}
 		pt := chooseAnswerPayload(m)
 		if pt < 0 {
-			if localPorts[i] == 0 && len(m.PayloadTypes) > 0 {
+			if port == 0 && len(m.PayloadTypes) > 0 {
 				// Declined stream with no codec we support: echo
 				// the first offered PT on the port-0 line.
 				fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", m.PayloadTypes[0])
@@ -251,13 +255,13 @@ func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []in
 				i, m.CodecName)
 		}
 
-		if localPorts[i] == 0 {
+		if port == 0 {
 			fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", pt)
 
 			continue
 		}
 
-		fmt.Fprintf(&b, "m=audio %d RTP/AVP %d\r\n", localPorts[i], pt)
+		fmt.Fprintf(&b, "m=audio %d RTP/AVP %d\r\n", port, pt)
 		fmt.Fprintf(&b, "a=rtpmap:%d %s/8000\r\n", pt, codecNameForPayload(pt))
 		// recvonly — we never send RTP back. RFC 7866-compliant
 		// SIPREC SRS answer: the SRC streams to us, we never

@@ -204,6 +204,7 @@ type session struct {
 	pending     bool // INVITE received, legs still being built
 	cancelled   bool // BYE/shutdown arrived while pending
 	answerVer   int
+	offer       *ParsedSDP // all offered m-lines, including declined streams
 
 	lastActivity atomic.Int64 // unix nano: last SIP message or RTP frame
 }
@@ -866,11 +867,8 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	// receivers and WAV writers, and just re-answer. Only a re-INVITE
 	// that changes the offered media shape falls through to the
 	// teardown-and-rebuild path below.
-	if isReinvite && (parsed.AllInactive() || len(parsed.Media) == len(existing.legs)) {
-		ports := make([]int, 0, len(existing.legs))
-		for _, l := range existing.legs {
-			ports = append(ports, l.port)
-		}
+	if isReinvite && reusableMedia(existing, parsed) {
+		ports := existing.answerPorts()
 
 		existing.answerVer++
 
@@ -884,6 +882,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		existing.paused = parsed.AllInactive()
+		existing.offer = parsed
 		if seq := req.CSeq(); seq != nil {
 			existing.remoteCSeq = seq.SeqNo
 		}
@@ -929,12 +928,24 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		metadata:    rec,
 		metadataXML: metadata,
 		pending:     true,
+		offer:       parsed,
+		paused:      parsed.AllInactive(),
 	}
 	if seq := req.CSeq(); seq != nil {
 		sess.remoteCSeq = seq.SeqNo
 	}
 	if isReinvite {
 		sess.toTag = existing.toTag
+		sess.answerVer = existing.answerVer
+		if sess.accountSid == "" {
+			sess.accountSid = existing.accountSid
+		}
+		if sess.callSid == "" {
+			sess.callSid = existing.callSid
+		}
+		if metadata == "" || metaErr != nil {
+			sess.metadata, sess.metadataXML = existing.metadata, existing.metadataXML
+		}
 	}
 	sess.touch()
 	sh.sessions[callID] = sess
@@ -1029,7 +1040,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	sh.mu.Lock()
 	sess.legs = legs
-	answer, err := BuildAnswerSDPWithVersion(sh.localIP, parsed, answerPorts, 1)
+	answer, err := BuildAnswerSDPWithVersion(sh.localIP, parsed, answerPorts, sess.answerVer+1)
 	if err != nil {
 		sh.mu.Unlock()
 		log.Printf("[siprecsrv] %s: build answer: %v", callID, err)
@@ -1055,6 +1066,43 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	sh.mu.Unlock()
 
 	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", sess.toTag)
+}
+
+func reusableMedia(sess *session, offer *ParsedSDP) bool {
+	if sess.offer == nil {
+		// Sessions built by embedders predating full offer tracking.
+		return offer.AllInactive() || len(offer.Media) == len(sess.legs)
+	}
+	if len(sess.offer.Media) != len(offer.Media) || sess.offer.ConnectionIP != offer.ConnectionIP {
+		return false
+	}
+	for i, m := range offer.Media {
+		prior := sess.offer.Media[i]
+		if m.Port != prior.Port || m.CodecName != prior.CodecName ||
+			m.Label != prior.Label || m.ConnectionIP != prior.ConnectionIP {
+			return false
+		}
+	}
+	return true
+}
+
+func (sess *session) answerPorts() []int {
+	if sess.offer == nil {
+		ports := make([]int, len(sess.legs))
+		for i, l := range sess.legs {
+			ports[i] = l.port
+		}
+		return ports
+	}
+	ports := make([]int, len(sess.offer.Media))
+	legIndex := 0
+	for i, m := range sess.offer.Media {
+		if m.Port != 0 {
+			ports[i] = sess.legs[legIndex].port
+			legIndex++
+		}
+	}
+	return ports
 }
 
 func (sess *session) staleCSeq(req *sip.Request) bool {
