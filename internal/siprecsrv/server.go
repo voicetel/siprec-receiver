@@ -54,6 +54,7 @@ const maxStreamsPerInvite = 8
 const (
 	defaultMaxSessions  = 256
 	defaultIdleTimeout  = 5 * time.Minute
+	pausedIdleTimeout   = 24 * time.Hour // paused media is intentionally silent
 	pendingTimeout      = 60 * time.Second
 	maxLegSamples       = 8000 * 4 * 3600 // 4 h per leg, hard cap
 	rateAllowanceFactor = 1.5             // vs. the 8 kHz sample clock
@@ -520,11 +521,15 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 			sh.mu.Lock()
 			for id, sess := range sh.sessions {
 				idle := now.Sub(time.Unix(0, sess.lastActivity.Load()))
+				timeout := sh.idleTimeout
+				if sess.paused && timeout < pausedIdleTimeout {
+					timeout = pausedIdleTimeout
+				}
 				switch {
 				case sess.pending && now.Sub(sess.started) > pendingTimeout:
 					sess.cancelled = true
 					delete(sh.sessions, id)
-				case !sess.pending && idle > sh.idleTimeout:
+				case !sess.pending && idle > timeout:
 					delete(sh.sessions, id)
 					victims = append(victims, sess)
 				}
@@ -532,8 +537,7 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 			sh.mu.Unlock()
 
 			for _, sess := range victims {
-				log.Printf("[siprecsrv] reaping idle session call-id=%s (no SIP/RTP for %s)",
-					sess.callID, sh.idleTimeout)
+				log.Printf("[siprecsrv] reaping idle session call-id=%s paused=%v", sess.callID, sess.paused)
 				sh.finalizeSession(context.Background(), sess)
 			}
 		}

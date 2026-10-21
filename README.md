@@ -244,6 +244,10 @@ without needing the recording dialog's SIP Call-ID.
   file (and `duration_sec`, which counts recorded samples) contains
   only the audio that was actually sent. A 4 s + 3 s-pause + 4 s call
   yields an ≈8 s recording, not 11 s.
+  Explicitly paused dialogs have a separate 24-hour inactivity allowance
+  (or `SIPREC_SESSION_IDLE_SEC`, if longer), so a normal five-minute
+  media-idle timeout does not end a long pause. BYE and shutdown still
+  finalize them immediately; abandoned paused dialogs eventually expire.
 - **Write failures are loud, never silent:** the first WAV write error
   on a leg (the classic case is a full disk) is logged immediately as
   `WAV WRITE FAILED`, stored on the leg, and shown in the UI (a
