@@ -51,6 +51,11 @@ const sipRecordingSampleRate = 8000
 // streams); 8 is generous headroom, not a target.
 const maxStreamsPerInvite = 8
 
+// maxCallIDLength bounds the SIP Call-ID used as the session-map and
+// database key. Real FreeSWITCH/SIPREC Call-IDs are far shorter; the cap
+// only rejects abusive or malformed values.
+const maxCallIDLength = 512
+
 const (
 	defaultMaxSessions  = 256
 	defaultIdleTimeout  = 5 * time.Minute
@@ -547,7 +552,7 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 			sh.mu.Unlock()
 
 			for _, sess := range victims {
-				log.Printf("[siprecsrv] reaping idle session call-id=%s paused=%v", sess.callID, sess.paused)
+				log.Printf("[siprecsrv] reaping idle session call-id=%q paused=%v", sess.callID, sess.paused)
 				sh.finalizeSession(context.Background(), sess)
 			}
 		}
@@ -559,7 +564,7 @@ func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
 		l.receiver.Stop()
 
 		if err := l.writer.close(); err != nil {
-			log.Printf("[siprecsrv] %s: wav close: %v", sess.callID, err)
+			log.Printf("[siprecsrv] %q: wav close: %v", sess.callID, err)
 		}
 
 		dur := l.writer.durationSec()
@@ -592,7 +597,7 @@ func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
 			MetadataXML: sess.metadataXML,
 			WriteErr:    writeErr,
 		}); err != nil {
-			log.Printf("[siprecsrv] %s: finalize leg %s: %v", sess.callID, l.label, err)
+			log.Printf("[siprecsrv] %q: finalize leg %q: %v", sess.callID, l.label, err)
 		}
 	}
 }
@@ -694,7 +699,10 @@ func (s *Server) onOptions(req *sip.Request, tx sip.ServerTransaction) {
 }
 
 func (s *Server) onAck(req *sip.Request, _ sip.ServerTransaction) {
-	callID := callIDOf(req)
+	callID, ok := requestCallID(req)
+	if !ok {
+		return
+	}
 
 	s.shared.mu.Lock()
 	if sess, ok := s.shared.sessions[callID]; ok && !sess.dialogMismatch(req) &&
@@ -703,7 +711,7 @@ func (s *Server) onAck(req *sip.Request, _ sip.ServerTransaction) {
 	}
 	s.shared.mu.Unlock()
 
-	log.Printf("[siprecsrv] ACK call-id=%s — recording active", callID)
+	log.Printf("[siprecsrv] ACK call-id=%q — recording active", callID)
 }
 
 func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
@@ -718,7 +726,13 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		}
 	}()
 
-	callID := callIDOf(req)
+	callID, valid := requestCallID(req)
+	if !valid {
+		log.Printf("[siprecsrv] BYE rejected: missing or invalid Call-ID (length %d)", callIDLength(req))
+		s.respond(req, tx, sip.StatusBadRequest, "invalid Call-ID", nil, "")
+
+		return
+	}
 
 	sh := s.shared
 	sh.mu.Lock()
@@ -726,7 +740,7 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 
 	if ok && sess.dialogMismatch(req) {
 		sh.mu.Unlock()
-		log.Printf("[siprecsrv] BYE call-id=%s rejected: dialog mismatch", callID)
+		log.Printf("[siprecsrv] BYE call-id=%q rejected: dialog mismatch", callID)
 		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
 
 		return
@@ -751,7 +765,7 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	s.respond(req, tx, sip.StatusOK, "OK", nil, "")
 
 	if !ok {
-		log.Printf("[siprecsrv] BYE for unknown call-id=%s", callID)
+		log.Printf("[siprecsrv] BYE for unknown call-id=%q", callID)
 
 		return
 	}
@@ -766,7 +780,7 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	dur := time.Since(sess.started)
 	sh.finalizeSession(context.Background(), sess)
 
-	log.Printf("[siprecsrv] BYE call-id=%s duration=%s legs=%d",
+	log.Printf("[siprecsrv] BYE call-id=%q duration=%s legs=%d",
 		callID, dur.Round(time.Millisecond), len(sess.legs))
 }
 
@@ -783,11 +797,18 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 	}()
 
-	callID := callIDOf(req)
+	callID, valid := requestCallID(req)
+	if !valid {
+		log.Printf("[siprecsrv] INVITE rejected: missing or invalid Call-ID (length %d)", callIDLength(req))
+		s.respond(req, tx, sip.StatusBadRequest, "invalid Call-ID", nil, "")
+
+		return
+	}
+
 	sh := s.shared
 
 	if srcIP := srcIPOf(req); !sh.allowedSource(srcIP) {
-		log.Printf("[siprecsrv] INVITE call-id=%s rejected: source %s not in allowlist", callID, srcIP)
+		log.Printf("[siprecsrv] INVITE call-id=%q rejected: source %q not in allowlist", callID, srcIP)
 		s.respond(req, tx, sip.StatusForbidden, "Forbidden", nil, "")
 
 		return
@@ -813,7 +834,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	sdp, metadata, err := extractSDPAndMetadata(req)
 	if err != nil {
-		log.Printf("[siprecsrv] %s: parse body: %v", callID, err)
+		log.Printf("[siprecsrv] %q: parse body: %v", callID, err)
 		s.respond(req, tx, sip.StatusBadRequest, "bad SIPREC body", nil, "")
 
 		return
@@ -821,14 +842,14 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	parsed, err := ParseSDP(sdp)
 	if err != nil {
-		log.Printf("[siprecsrv] %s: parse sdp: %v", callID, err)
+		log.Printf("[siprecsrv] %q: parse sdp: %v", callID, err)
 		s.respond(req, tx, sip.StatusBadRequest, "bad SDP", nil, "")
 
 		return
 	}
 
 	if len(parsed.Media) > maxStreamsPerInvite {
-		log.Printf("[siprecsrv] %s: %d offered streams exceeds cap %d", callID, len(parsed.Media), maxStreamsPerInvite)
+		log.Printf("[siprecsrv] %q: %d offered streams exceeds cap %d", callID, len(parsed.Media), maxStreamsPerInvite)
 		s.respond(req, tx, sip.StatusNotAcceptableHere, "too many streams", nil, "")
 
 		return
@@ -838,7 +859,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if metaErr != nil {
 		// Metadata parse failure is non-fatal: record by SDP label
 		// position, lose the participant naming.
-		log.Printf("[siprecsrv] %s: parse metadata: %v (continuing with positional labels)",
+		log.Printf("[siprecsrv] %q: parse metadata: %v (continuing with positional labels)",
 			callID, metaErr)
 
 		rec = &Recording{}
@@ -859,7 +880,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	if isReinvite && existing.dialogMismatch(req) {
 		sh.mu.Unlock()
-		log.Printf("[siprecsrv] re-INVITE call-id=%s rejected: dialog mismatch", callID)
+		log.Printf("[siprecsrv] re-INVITE call-id=%q rejected: dialog mismatch", callID)
 		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
 
 		return
@@ -884,7 +905,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		answer, aerr := BuildAnswerSDPWithVersion(sh.localIP, parsed, ports, existing.answerVer)
 		if aerr != nil {
 			sh.mu.Unlock()
-			log.Printf("[siprecsrv] %s: re-INVITE build answer: %v", callID, aerr)
+			log.Printf("[siprecsrv] %q: re-INVITE build answer: %v", callID, aerr)
 			s.respond(req, tx, sip.StatusInternalServerError, "sdp build failed", nil, "")
 
 			return
@@ -907,7 +928,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		paused, tag := existing.paused, existing.toTag
 		sh.mu.Unlock()
 
-		log.Printf("[siprecsrv] re-INVITE call-id=%s paused=%v — recording continues on %d leg(s)",
+		log.Printf("[siprecsrv] re-INVITE call-id=%q paused=%v — recording continues on %d leg(s)",
 			callID, paused, len(existing.legs))
 		s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", tag)
 
@@ -916,7 +937,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	if !isReinvite && len(sh.sessions) >= sh.maxSessions {
 		sh.mu.Unlock()
-		log.Printf("[siprecsrv] INVITE call-id=%s rejected: session cap %d reached", callID, sh.maxSessions)
+		log.Printf("[siprecsrv] INVITE call-id=%q rejected: session cap %d reached", callID, sh.maxSessions)
 		s.respond(req, tx, sip.StatusServiceUnavailable, "session limit", nil, "")
 
 		return
@@ -961,10 +982,10 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	sh.mu.Unlock()
 
 	if isReinvite {
-		log.Printf("[siprecsrv] re-INVITE call-id=%s — media shape changed, replacing prior session", callID)
+		log.Printf("[siprecsrv] re-INVITE call-id=%q — media shape changed, replacing prior session", callID)
 		sh.finalizeSession(context.Background(), existing)
 	} else {
-		log.Printf("[siprecsrv] INVITE call-id=%s from=%s", callID, fromURI)
+		log.Printf("[siprecsrv] INVITE call-id=%q from=%q", callID, fromURI)
 	}
 
 	legs := make([]*leg, 0, len(parsed.Media))
@@ -1016,7 +1037,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 				reason = "rtp open failed"
 			}
 
-			log.Printf("[siprecsrv] %s: acquire port %d: %v", callID, i, aerr)
+			log.Printf("[siprecsrv] %q: acquire port %d: %v", callID, i, aerr)
 			rollback()
 			s.respond(req, tx, sip.StatusInternalServerError, reason, nil, "")
 
@@ -1025,7 +1046,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		wavPath, wr, werr := openNewWAV(sh.recordingDir)
 		if werr != nil {
-			log.Printf("[siprecsrv] %s: open wav %d: %v", callID, i, werr)
+			log.Printf("[siprecsrv] %q: open wav %d: %v", callID, i, werr)
 			recv.Stop()
 			sh.pool.Release(port)
 			rollback()
@@ -1043,7 +1064,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		})
 		answerPorts = append(answerPorts, port)
 
-		log.Printf("[siprecsrv] %s: leg=%s rtp_port=%d codec=%s wav=%s",
+		log.Printf("[siprecsrv] %q: leg=%q rtp_port=%d codec=%s wav=%q",
 			callID, legLabel, port, m.CodecName, wavPath)
 	}
 
@@ -1052,7 +1073,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	answer, err := BuildAnswerSDPWithVersion(sh.localIP, parsed, answerPorts, sess.answerVer+1)
 	if err != nil {
 		sh.mu.Unlock()
-		log.Printf("[siprecsrv] %s: build answer: %v", callID, err)
+		log.Printf("[siprecsrv] %q: build answer: %v", callID, err)
 		rollback()
 		s.respond(req, tx, sip.StatusInternalServerError, "sdp build failed", nil, "")
 		return
@@ -1235,10 +1256,43 @@ func extractSDPAndMetadata(req *sip.Request) (sdp string, metadata string, err e
 	return sdp, metadata, nil
 }
 
+// callIDOf extracts the trimmed SIP Call-ID, or "" when the header
+// is absent. Callers that key sessions or database rows by it must
+// use requestCallID so malformed requests cannot collide on a
+// sentinel value.
 func callIDOf(req *sip.Request) string {
 	if h := req.CallID(); h != nil {
-		return h.Value()
+		return strings.TrimSpace(h.Value())
 	}
 
-	return "unknown"
+	return ""
+}
+
+// requestCallID returns the request's Call-ID only when it is safe
+// to use as a session/database key: present, at most
+// maxCallIDLength bytes, and made solely of printable ASCII other
+// than space. This accepts ordinary SIP Call-ID formats (including
+// UUIDs and UUID@host forms) without imposing a particular shape.
+func requestCallID(req *sip.Request) (string, bool) {
+	id := callIDOf(req)
+
+	return id, validCallID(id)
+}
+
+func validCallID(id string) bool {
+	if id == "" || len(id) > maxCallIDLength {
+		return false
+	}
+
+	for i := 0; i < len(id); i++ {
+		if id[i] < 0x21 || id[i] > 0x7e {
+			return false
+		}
+	}
+
+	return true
+}
+
+func callIDLength(req *sip.Request) int {
+	return len(callIDOf(req))
 }

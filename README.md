@@ -208,8 +208,12 @@ without needing the recording dialog's SIP Call-ID.
 - **INVITE:** the body must contain an SDP part; an RS-Metadata part is
   used for naming/correlation when present and ignored (with positional
   leg labels) when absent or malformed. A body with no SDP is a 400.
-  Sources outside `SIPREC_ALLOW_CIDRS` get 403; more than 8 offered
-  streams gets 488; at the session cap, 503.
+  The SIP Call-ID is treated as an opaque dialog key — any ordinary SIP
+  format is accepted — but it must be present, at most 512 bytes, and
+  printable ASCII without spaces or controls; a missing or malformed
+  Call-ID gets 400 and never creates a session. The same validation
+  applies to BYE. Sources outside `SIPREC_ALLOW_CIDRS` get 403; more
+  than 8 offered streams gets 488; at the session cap, 503.
 - **200 OK:** always plain `application/sdp` — one `m=audio` per offered
   stream with an SRS-pool port, the chosen G.711 payload type (the first
   offered PCMU/PCMA, dynamic payload types included; the answer always
