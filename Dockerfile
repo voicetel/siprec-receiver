@@ -2,9 +2,11 @@
 # Multi-stage: CGO build (SQLite) in the Go image, slim runtime.
 #   docker build -t siprec-receiver .
 #   docker run --rm -p 5070:5070/udp -p 5070:5070/tcp -p 8080:8080 \
+#     -p 41000-42000:41000-42000/udp \
 #     -v siprec-data:/data --env-file .env siprec-receiver
 # SIPREC_LOCAL_IP must be an address the SRC can reach for RTP; in a
-# container deployment that is normally the host's address (or use
+# container deployment that is normally the host's address; RTP binds
+# 0.0.0.0 inside the container (or use
 # --network host and keep the default loopback listeners).
 FROM golang:1.26 AS build
 WORKDIR /src
@@ -21,6 +23,7 @@ ENV RECORDING_DIR=/data/recordings \
     DB_PATH=/data/siprec-receiver.db \
     HTTP_LISTEN=0.0.0.0:8080 \
     SIPREC_LISTEN=0.0.0.0:5070
+ENV SIPREC_RTP_BIND_IP=0.0.0.0
 VOLUME /data
 EXPOSE 5070/udp 5070/tcp 8080/tcp
 ENTRYPOINT ["/usr/local/bin/siprec-receiver"]

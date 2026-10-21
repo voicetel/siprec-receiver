@@ -93,6 +93,7 @@ type Finalizer interface {
 // and the recording sink.
 type sharedState struct {
 	localIP      string
+	rtpBindIP    string
 	recordingDir string
 	pool         *rtp.PortPool
 	finalizer    Finalizer
@@ -135,6 +136,7 @@ type Server struct {
 func New(localIP, recordingDir string, portPool *rtp.PortPool) *Server {
 	shared := &sharedState{
 		localIP:      localIP,
+		rtpBindIP:    localIP,
 		recordingDir: recordingDir,
 		pool:         portPool,
 		maxSessions:  defaultMaxSessions,
@@ -172,6 +174,13 @@ func (s *Server) SetLimits(allowCIDRs []*net.IPNet, maxSessions int, idleTimeout
 func (s *Server) SetFinalizer(f Finalizer) {
 	s.shared.finalizer = f
 	s.Finalizer = f
+}
+
+// SetRTPBindIP separates the local UDP bind address from the address
+// advertised in SDP, e.g. behind NAT. Call before Clone or Serve.
+// Empty means all IPv4 interfaces. New defaults to the advertised IP.
+func (s *Server) SetRTPBindIP(ip string) {
+	s.shared.rtpBindIP = ip
 }
 
 // Clone returns another listener sharing this server's sessions,
@@ -999,7 +1008,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		port, recv, aerr := rtp.AcquireBound(sh.pool, func(p int) (*rtp.Receiver, error) {
-			return rtp.NewReceiverIP(sh.localIP, p, lw.append)
+			return rtp.NewReceiverIP(sh.rtpBindIP, p, lw.append)
 		})
 		if aerr != nil {
 			reason := "no rtp ports available"

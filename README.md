@@ -113,7 +113,8 @@ All configuration is environment variables (see also `.env.example`).
 |---|---|---|
 | `SIPREC_LISTEN` | `127.0.0.1:5070` | SIP listen address for the SRS |
 | `SIPREC_NETWORKS` | `udp,tcp` | SIP transports to listen on (comma list) |
-| `SIPREC_LOCAL_IP` | `127.0.0.1` | IP advertised in the SDP answer (`c=IN IP4`) and bound by the RTP receivers — must be reachable by the SRC's RTP fork |
+| `SIPREC_LOCAL_IP` | `127.0.0.1` | IP advertised in SDP (`c=IN IP4`); must be reachable by the SRC's RTP fork |
+| `SIPREC_RTP_BIND_IP` | `SIPREC_LOCAL_IP` | Local IPv4 UDP bind address. Set to a local interface or `0.0.0.0` when the advertised address is a public/NAT address not assigned locally |
 | `SIPREC_ALLOW_CIDRS` | — (any source) | Comma list of CIDRs/IPs allowed to send SIPREC INVITEs; sources outside get 403. Set this (or firewall equivalently) in production |
 | `SIPREC_MAX_SESSIONS` | `256` | Concurrent SIPREC sessions cap; further INVITEs get 503 |
 | `SIPREC_SESSION_IDLE_SEC` | `300` | Finalize a session after this many seconds with no SIP message and no RTP (lost BYE, crashed SRC) |
@@ -230,7 +231,7 @@ without needing the recording dialog's SIP Call-ID.
   participant's number from RS-Metadata when resolvable, else the SDP
   label, else `leg<N>`) lives in the database. WAV files are written
   `0600` in a `0700` directory.
-- **RTP discipline:** receivers bind the advertised `SIPREC_LOCAL_IP`
+- **RTP discipline:** receivers bind `SIPREC_RTP_BIND_IP` (defaulting to `SIPREC_LOCAL_IP`)
   and lock onto the first (source, SSRC) they see — anything else is
   dropped, so stray packets cannot inject audio into a recording.
   Sequence gaps are filled with silence from RTP timestamps (duration

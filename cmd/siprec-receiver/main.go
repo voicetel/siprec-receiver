@@ -40,6 +40,7 @@ type config struct {
 	SIPListen      string
 	SIPNetworks    []string
 	SIPLocalIP     string
+	RTPBindIP      string
 	SIPTLSListen   string
 	SIPTLSCert     string
 	SIPTLSKey      string
@@ -137,6 +138,7 @@ func loadConfig() (config, error) {
 		SIPListen:      envOr("SIPREC_LISTEN", "127.0.0.1:5070"),
 		SIPNetworks:    networks,
 		SIPLocalIP:     envOr("SIPREC_LOCAL_IP", "127.0.0.1"),
+		RTPBindIP:      envOr("SIPREC_RTP_BIND_IP", envOr("SIPREC_LOCAL_IP", "127.0.0.1")),
 		SIPTLSListen:   envOr("SIP_TLS_LISTEN", "127.0.0.1:5071"),
 		SIPTLSCert:     os.Getenv("SIP_TLS_CERT"),
 		SIPTLSKey:      os.Getenv("SIP_TLS_KEY"),
@@ -166,6 +168,11 @@ func loadConfig() (config, error) {
 // validateConfig fails fast on configuration that would otherwise
 // only surface as confusing runtime behavior.
 func validateConfig(cfg *config) error {
+	if cfg.RTPBindIP != "" {
+		if ip := net.ParseIP(cfg.RTPBindIP); ip == nil || ip.To4() == nil {
+			return fmt.Errorf("SIPREC_RTP_BIND_IP must be a local IPv4 address or 0.0.0.0")
+		}
+	}
 	for _, n := range cfg.SIPNetworks {
 		if n != "udp" && n != "tcp" {
 			return fmt.Errorf("SIPREC_NETWORKS entry %q is not udp or tcp", n)
@@ -304,6 +311,7 @@ func main() {
 	// map; every transport is a Clone sharing it, so a dialog that
 	// starts on UDP can end on TCP.
 	base := siprecsrv.New(cfg.SIPLocalIP, cfg.RecordingDir, pool)
+	base.SetRTPBindIP(cfg.RTPBindIP)
 	base.SetFinalizer(store.Finalizer{S: st})
 	base.SetLimits(cfg.AllowCIDRs, cfg.MaxSessions, cfg.SessionIdle)
 

@@ -36,7 +36,9 @@ models:
   INVITE's From-tag and source IP, streams per INVITE and
   concurrent sessions are capped, and idle sessions are reaped.
   The SDP answer advertises `SIPREC_LOCAL_IP`, which the RTP
-  receivers also bind; each leg locks onto its first RTP sender
+  receivers bind by default. Set `SIPREC_RTP_BIND_IP` separately behind
+  NAT or inside a bridged container; firewall that interface and the RTP
+  port range to your SRC hosts. Each leg locks onto its first RTP sender
   (source + SSRC) and drops everything else.
 - **AMD notify endpoint (`POST /api/notify/amd`)** — authenticated
   with the `NOTIFY_SECRET` shared secret (Bearer header preferred;
