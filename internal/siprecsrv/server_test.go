@@ -105,9 +105,11 @@ func TestServer_SIPRECInvite_ProducesNamedWAVsAndFinalizes(t *testing.T) {
 		t.Fatalf("TransactionRequest: %v", err)
 	}
 	defer tx.Terminate()
+	toTag := ""
 
 	select {
 	case res := <-tx.Responses():
+		toTag, _ = res.To().Params.Get("tag")
 		if res.StatusCode != sip.StatusOK {
 			t.Fatalf("status=%d reason=%s body=%s",
 				res.StatusCode, res.Reason, string(res.Body()))
@@ -148,6 +150,10 @@ func TestServer_SIPRECInvite_ProducesNamedWAVsAndFinalizes(t *testing.T) {
 	byeReq.AppendHeader(sip.NewHeader("CSeq", "2 BYE"))
 	byeReq.AppendHeader(sip.NewHeader("From", "<sip:caller@example.com>;tag=test-tag"))
 	byeReq.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:srs@127.0.0.1:%d>", port)))
+	to := byeReq.To()
+	to.Params.Add("tag", toTag)
+	byeReq.RemoveHeader("To")
+	byeReq.AppendHeader(to)
 
 	byeTx, err := cli.TransactionRequest(ctx, byeReq)
 	if err != nil {

@@ -20,6 +20,7 @@ type hardeningClient struct {
 	cli    *sipgo.Client
 	target sip.Uri
 	port   int
+	toTags map[string]string
 }
 
 func newHardeningClient(t *testing.T, port int) *hardeningClient {
@@ -42,7 +43,7 @@ func newHardeningClient(t *testing.T, port int) *hardeningClient {
 	target := sip.Uri{User: "srs", Host: "127.0.0.1", Port: port, UriParams: sip.NewParams()}
 	target.UriParams.Add("transport", "tcp")
 
-	return &hardeningClient{t: t, cli: cli, target: target, port: port}
+	return &hardeningClient{t: t, cli: cli, target: target, port: port, toTags: make(map[string]string)}
 }
 
 func (c *hardeningClient) send(method sip.RequestMethod, cseq int, callID, fromTag string, body []byte, ct string) *sip.Response {
@@ -55,6 +56,12 @@ func (c *hardeningClient) send(method sip.RequestMethod, cseq int, callID, fromT
 	}
 	req.AppendHeader(sip.NewHeader("From", fmt.Sprintf("<sip:caller@example.com>;tag=%s", fromTag)))
 	req.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:srs@127.0.0.1:%d>", c.port)))
+	if tag := c.toTags[callID]; tag != "" {
+		to := req.To()
+		to.Params.Add("tag", tag)
+		req.RemoveHeader("To")
+		req.AppendHeader(to)
+	}
 	req.AppendHeader(sip.NewHeader("Call-ID", callID))
 	req.AppendHeader(sip.NewHeader("CSeq", fmt.Sprintf("%d %s", cseq, method)))
 
@@ -66,6 +73,9 @@ func (c *hardeningClient) send(method sip.RequestMethod, cseq int, callID, fromT
 
 	select {
 	case res := <-tx.Responses():
+		if method == sip.INVITE && res.StatusCode == 200 {
+			c.toTags[callID], _ = res.To().Params.Get("tag")
+		}
 		return res
 	case <-time.After(3 * time.Second):
 		c.t.Fatalf("timeout waiting for %s response", method)

@@ -192,6 +192,8 @@ type session struct {
 	callSid     string
 	fromURI     string
 	fromTag     string
+	toTag       string
+	remoteCSeq  uint32
 	srcIP       string
 	legs        []*leg
 	started     time.Time
@@ -608,7 +610,17 @@ func (sh *sharedState) allowedSource(ip string) bool {
 // didn't carry it; empty means "cannot check, allow".
 func (sess *session) dialogMismatch(req *sip.Request) bool {
 	if sess.fromTag != "" {
-		if tag := fromTagOf(req); tag != "" && tag != sess.fromTag {
+		if tag := fromTagOf(req); tag != sess.fromTag {
+			return true
+		}
+	}
+	if sess.toTag != "" {
+		to := req.To()
+		if to == nil {
+			return true
+		}
+		tag, _ := to.Params.Get("tag")
+		if tag != sess.toTag {
 			return true
 		}
 	}
@@ -642,7 +654,14 @@ func srcIPOf(req *sip.Request) string {
 }
 
 func (s *Server) respond(req *sip.Request, tx sip.ServerTransaction, code int, reason string, body []byte, contentType string) {
+	s.respondWithTag(req, tx, code, reason, body, contentType, "")
+}
+
+func (s *Server) respondWithTag(req *sip.Request, tx sip.ServerTransaction, code int, reason string, body []byte, contentType, tag string) {
 	resp := sip.NewResponseFromRequest(req, code, reason, body)
+	if tag != "" {
+		resp.To().Params.Add("tag", tag)
+	}
 	if contentType != "" {
 		resp.AppendHeader(sip.NewHeader("Content-Type", contentType))
 	}
@@ -664,7 +683,8 @@ func (s *Server) onAck(req *sip.Request, _ sip.ServerTransaction) {
 	callID := callIDOf(req)
 
 	s.shared.mu.Lock()
-	if sess, ok := s.shared.sessions[callID]; ok {
+	if sess, ok := s.shared.sessions[callID]; ok && !sess.dialogMismatch(req) &&
+		(req.CSeq() != nil && req.CSeq().SeqNo == sess.remoteCSeq || sess.remoteCSeq == 0) {
 		sess.touch()
 	}
 	s.shared.mu.Unlock()
@@ -690,11 +710,16 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 	sh.mu.Lock()
 	sess, ok := sh.sessions[callID]
 
-	if ok && !sess.pending && sess.dialogMismatch(req) {
+	if ok && sess.dialogMismatch(req) {
 		sh.mu.Unlock()
 		log.Printf("[siprecsrv] BYE call-id=%s rejected: dialog mismatch", callID)
 		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
 
+		return
+	}
+	if ok && sess.staleCSeq(req) {
+		sh.mu.Unlock()
+		s.respond(req, tx, sip.StatusInternalServerError, "CSeq out of order", nil, "")
 		return
 	}
 
@@ -825,6 +850,11 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		return
 	}
+	if isReinvite && existing.staleCSeq(req) {
+		sh.mu.Unlock()
+		s.respond(req, tx, sip.StatusInternalServerError, "CSeq out of order", nil, "")
+		return
+	}
 
 	// Re-INVITE on a live dialog. mod_siprec pause/resume (RFC 7866
 	// §6.4) re-INVITEs with SDP only: a=inactive pauses, a=sendonly
@@ -850,6 +880,9 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		existing.paused = parsed.AllInactive()
+		if seq := req.CSeq(); seq != nil {
+			existing.remoteCSeq = seq.SeqNo
+		}
 
 		// A re-INVITE whose metadata fails to parse must not replace
 		// good metadata with an empty document.
@@ -859,11 +892,12 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		existing.touch()
+		paused, tag := existing.paused, existing.toTag
 		sh.mu.Unlock()
 
 		log.Printf("[siprecsrv] re-INVITE call-id=%s paused=%v — recording continues on %d leg(s)",
-			callID, existing.paused, len(existing.legs))
-		s.respond(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp")
+			callID, paused, len(existing.legs))
+		s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", tag)
 
 		return
 	}
@@ -885,11 +919,18 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		callSid:     callSid,
 		fromURI:     fromURI,
 		fromTag:     fromTagOf(req),
+		toTag:       sip.GenerateTagN(16),
 		srcIP:       srcIPOf(req),
 		started:     time.Now(),
 		metadata:    rec,
 		metadataXML: metadata,
 		pending:     true,
+	}
+	if seq := req.CSeq(); seq != nil {
+		sess.remoteCSeq = seq.SeqNo
+	}
+	if isReinvite {
+		sess.toTag = existing.toTag
 	}
 	sess.touch()
 	sh.sessions[callID] = sess
@@ -1009,7 +1050,11 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	sess.answerVer++
 	sh.mu.Unlock()
 
-	s.respond(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp")
+	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", sess.toTag)
+}
+
+func (sess *session) staleCSeq(req *sip.Request) bool {
+	return sess.remoteCSeq != 0 && (req.CSeq() == nil || req.CSeq().SeqNo <= sess.remoteCSeq)
 }
 
 // openNewWAV creates a fresh recording file under a server-generated

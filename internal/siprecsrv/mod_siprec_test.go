@@ -155,6 +155,7 @@ func TestServer_ModSiprecPauseResumeKeepsOneRecording(t *testing.T) {
 	target.UriParams.Add("transport", "tcp")
 	target.UriParams.Add("vm-callsid", "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 
+	toTag := ""
 	send := func(method sip.RequestMethod, cseq int, body []byte, ct string) int {
 		req := sip.NewRequest(method, target)
 		if body != nil {
@@ -163,6 +164,12 @@ func TestServer_ModSiprecPauseResumeKeepsOneRecording(t *testing.T) {
 		}
 		req.AppendHeader(sip.NewHeader("From", "<sip:+12165285911@fs.example.com>;tag=src-tag"))
 		req.AppendHeader(sip.NewHeader("To", fmt.Sprintf("<sip:srs@127.0.0.1:%d>", port)))
+		if toTag != "" {
+			to := req.To()
+			to.Params.Add("tag", toTag)
+			req.RemoveHeader("To")
+			req.AppendHeader(to)
+		}
 		req.AppendHeader(sip.NewHeader("Call-ID", callID))
 		req.AppendHeader(sip.NewHeader("CSeq", fmt.Sprintf("%d %s", cseq, method)))
 
@@ -178,6 +185,9 @@ func TestServer_ModSiprecPauseResumeKeepsOneRecording(t *testing.T) {
 
 		select {
 		case res := <-tx.Responses():
+			if method == sip.INVITE && res.StatusCode == 200 {
+				toTag, _ = res.To().Params.Get("tag")
+			}
 			return res.StatusCode
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timeout waiting for %s response", method)
