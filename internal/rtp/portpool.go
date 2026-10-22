@@ -29,11 +29,16 @@ type PortPool struct {
 // ports follow the RTP convention (the corresponding odd port is reserved
 // for RTCP, though we currently don't use it).
 func NewPortPool(lo, hi int) *PortPool {
+	size := 0
+	if hi >= lo {
+		size = (hi-lo)/2 + 1
+	}
+
 	p := &PortPool{
 		lo:    lo,
 		hi:    hi,
 		inUse: make(map[int]struct{}),
-		free:  make([]int, 0, (hi-lo)/2+1),
+		free:  make([]int, 0, size),
 	}
 	for port := lo; port <= hi; port += 2 {
 		p.free = append(p.free, port)
@@ -44,6 +49,29 @@ func NewPortPool(lo, hi int) *PortPool {
 	// Acquire / Release.
 
 	return p
+}
+
+// RotateStart moves the first n free ports to the back of the queue, so
+// allocation begins n ports into the range (n wraps modulo the free
+// count). Called once at startup with a random n: a restarted process
+// would otherwise hand its first calls the same ports its predecessor
+// did, which SRC forks for the dialogs it lost may still be sending to.
+func (p *PortPool) RotateStart(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.free) == 0 {
+		return
+	}
+
+	n %= len(p.free)
+	if n < 0 {
+		n += len(p.free)
+	}
+
+	rotated := make([]int, 0, len(p.free))
+	rotated = append(rotated, p.free[n:]...)
+	p.free = append(rotated, p.free[:n]...)
 }
 
 // Acquire returns the oldest free port, or an error if the pool is

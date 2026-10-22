@@ -68,6 +68,16 @@ const (
 
 const reaperInterval = 15 * time.Second
 
+// defaultPortProbe is how long a freshly bound RTP port is watched for
+// traffic before it is offered in an answer. Just over one 20 ms
+// packetization interval: a stream still aimed at the port shows up in
+// that time.
+const defaultPortProbe = 25 * time.Millisecond
+
+// errStalePort marks a port that was already receiving a stream before
+// any answer named it.
+var errStalePort = errors.New("port is receiving another stream")
+
 // FinalizedLeg describes one completed, closed recording leg — everything
 // a Finalizer needs to persist it.
 type FinalizedLeg struct {
@@ -108,6 +118,7 @@ type sharedState struct {
 	idleTimeout time.Duration
 
 	reaperTick time.Duration // how often the reaper scans; tests shrink it
+	portProbe  time.Duration // stale-traffic watch on each bound RTP port
 
 	mu         sync.Mutex
 	sessions   map[string]*session
@@ -147,6 +158,7 @@ func New(localIP, recordingDir string, portPool *rtp.PortPool) *Server {
 		maxSessions:  defaultMaxSessions,
 		idleTimeout:  defaultIdleTimeout,
 		reaperTick:   reaperInterval,
+		portProbe:    defaultPortProbe,
 		sessions:     make(map[string]*session),
 		stop:         make(chan struct{}),
 	}
@@ -1029,7 +1041,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		}
 
 		port, recv, aerr := rtp.AcquireBound(sh.pool, func(p int) (*rtp.Receiver, error) {
-			return rtp.NewReceiverIP(sh.rtpBindIP, p, lw.append)
+			return sh.openReceiver(p, lw.append)
 		})
 		if aerr != nil {
 			reason := "no rtp ports available"
@@ -1096,6 +1108,26 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	sh.mu.Unlock()
 
 	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", sess.toTag)
+}
+
+// openReceiver binds an RTP receiver on port and refuses the port if a
+// stream is already arriving on it: an SRC fork for a dialog this
+// process ended without the SRC noticing (or lost in a restart) would
+// otherwise be locked onto, and that call's audio recorded into this
+// one. AcquireBound demotes a refused port to the back of the pool.
+func (sh *sharedState) openReceiver(port int, cb rtp.FrameCallback) (*rtp.Receiver, error) {
+	recv, err := rtp.NewReceiverIP(sh.rtpBindIP, port, cb)
+	if err != nil {
+		return nil, err
+	}
+
+	if !recv.Quiet(sh.portProbe) {
+		recv.Stop()
+
+		return nil, fmt.Errorf("rtp port %d: %w", port, errStalePort)
+	}
+
+	return recv, nil
 }
 
 func reusableMedia(sess *session, offer *ParsedSDP) bool {

@@ -732,3 +732,20 @@ func TestMainStopsOnSignal(t *testing.T) {
 		t.Error("web server still answering after shutdown")
 	}
 }
+
+func TestRandomOffset(t *testing.T) {
+	seen := map[int]bool{}
+
+	for range 64 {
+		n := randomOffset()
+		if n < 0 || n > 65535 {
+			t.Fatalf("randomOffset() = %d, want 0..65535", n)
+		}
+
+		seen[n] = true
+	}
+
+	if len(seen) < 2 {
+		t.Error("randomOffset returned the same value 64 times")
+	}
+}

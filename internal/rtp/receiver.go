@@ -93,6 +93,27 @@ func NewReceiverIP(bindIP string, port int, callback FrameCallback) (*Receiver, 
 	}, nil
 }
 
+// Quiet reports whether no datagram arrives on the receiver's port
+// within d (d <= 0 skips the check). It reads the socket, so it must run
+// before Start. A freshly bound port that already receives traffic,
+// before any SDP answer has named it, is still the target of someone
+// else's stream: typically an SRC fork for a dialog this process
+// ended (or lost in a restart) without the SRC learning of it.
+func (r *Receiver) Quiet(d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+
+	if err := connSetReadDeadline(r.conn, time.Now().Add(d)); err != nil {
+		return true
+	}
+
+	buf := make([]byte, maxRTPPacket)
+	_, _, err := connReadFromUDP(r.conn, buf)
+
+	return err != nil
+}
+
 // Start begins receiving RTP packets. Non-blocking — runs in a goroutine.
 // The spawned loop closes loopDone on return so Stop can join it.
 func (r *Receiver) Start() {

@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -306,6 +307,10 @@ func main() {
 	}()
 
 	pool := rtp.NewPortPool(cfg.RTPPortMin, cfg.RTPPortMax)
+	// Start allocating at a random point in the range, so SRC forks
+	// still aimed at a previous process's ports are not handed to the
+	// first calls after a restart.
+	pool.RotateStart(randomOffset())
 
 	// One siprecsrv family: the base server owns the shared session
 	// map; every transport is a Clone sharing it, so a dialog that
@@ -475,4 +480,13 @@ func ephemeralSecret() string {
 	}
 
 	return hex.EncodeToString(b)
+}
+
+// randomOffset is a random non-negative int below 65536 from
+// crypto/rand, whose Read never returns an error.
+func randomOffset() int {
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+
+	return int(binary.BigEndian.Uint16(b[:]))
 }
