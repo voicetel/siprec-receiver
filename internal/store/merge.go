@@ -310,7 +310,9 @@ func takeDisposition(keep, drop mergeRow) bool {
 		return false
 	}
 
-	if keep.dispStatus == "" {
+	// A survivor status that only a fetched record filled (no callback
+	// set disp_notified_at) gives way to a callback's outcome.
+	if keep.dispStatus == "" || (keep.dispAt == 0 && drop.dispAt != 0) {
 		return true
 	}
 

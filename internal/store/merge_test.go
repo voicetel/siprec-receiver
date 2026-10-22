@@ -391,3 +391,55 @@ func TestMigrate_BackfillsLegDialogs(t *testing.T) {
 		t.Errorf("backfilled leg dialog = %q, %v", dlg, err)
 	}
 }
+
+// A status that only a fetched VoiceML record filled in is not an event:
+// the call's real final callback, arriving later without ordering
+// fields, replaces it with its duration and SIP code instead of being
+// judged stale.
+func TestFetchedStatusGivesWayToTheCallback(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	id := recordSimpleLeg(t, s, "dlg-fetched", time.Now())
+	mustExec(t, s, `UPDATE calls SET call_sid = 'CA00000000000000000000000000000f01' WHERE id = ?`, id)
+
+	if err := s.SaveVoiceMLRecord(ctx, id, VoiceMLRecord{Status: "completed", DurationSec: 30}, `{}`); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.ApplyDisposition(ctx, DispositionNotification{
+		CallSid: "CA00000000000000000000000000000f01", CallStatus: "completed", DurationSec: 62, SipCode: 200,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, _ := s.GetCall(ctx, id)
+	if c.DispDurationSec != 62 || c.DispSipCode != 200 || c.DispNotifiedAt.IsZero() {
+		t.Errorf("after the callback: duration %d sip %d notified %v", c.DispDurationSec, c.DispSipCode, c.DispNotifiedAt)
+	}
+
+	// Once a callback set it, a later callback without ordering keeps
+	// the established terminal outcome.
+	if _, _, err := s.ApplyDisposition(ctx, DispositionNotification{
+		CallSid: "CA00000000000000000000000000000f01", CallStatus: "failed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if c, _ := s.GetCall(ctx, id); c.DispStatus != "completed" || c.DispDurationSec != 62 {
+		t.Errorf("a second terminal callback replaced the first: %q %d", c.DispStatus, c.DispDurationSec)
+	}
+}
+
+func TestTakeDispositionOverFetchedStatus(t *testing.T) {
+	fetched := mergeRow{dispStatus: "completed"}
+	called := mergeRow{dispStatus: "busy", dispAt: 5}
+
+	if !takeDisposition(fetched, called) {
+		t.Error("a callback's outcome did not replace a fetched-only status")
+	}
+
+	if takeDisposition(called, fetched) {
+		t.Error("a fetched-only status replaced a callback's terminal outcome")
+	}
+}

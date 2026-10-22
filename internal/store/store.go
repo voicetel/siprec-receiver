@@ -1102,10 +1102,17 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 	if id != 0 {
 		var priorStatus string
 		var priorSeq sql.NullInt64
-		var priorAt int64
-		if err := tx.QueryRowContext(ctx, `SELECT disp_status, disp_sequence, disp_event_at FROM calls WHERE id = ?`, id).
-			Scan(&priorStatus, &priorSeq, &priorAt); err != nil {
+		var priorAt, priorNotified int64
+		if err := tx.QueryRowContext(ctx, `SELECT disp_status, disp_sequence, disp_event_at, disp_notified_at FROM calls WHERE id = ?`, id).
+			Scan(&priorStatus, &priorSeq, &priorAt, &priorNotified); err != nil {
 			return 0, false, fmt.Errorf("store: disposition order lookup: %w", err)
+		}
+
+		// A status only a fetched VoiceML record filled in (no callback
+		// ever set disp_notified_at) is not an event: the real callback
+		// replaces it, with its duration, SIP code and error.
+		if priorNotified == 0 {
+			priorStatus = ""
 		}
 
 		if !staleDisposition(priorStatus, priorSeq, priorAt, n) {
