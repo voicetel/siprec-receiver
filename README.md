@@ -313,6 +313,15 @@ Notifications are upserts, order-independent:
   immediately; when the recording later arrives carrying the same
   `CallSid` or FreeSWITCH UUID, it adopts the disposition and the
   placeholder row disappears.
+- One call, one row: every row an event's keys name (`CallSid`, a
+  recording dialog's SIP Call-ID, `FsUuid`) is folded into one, so
+  notifications keyed differently never leave a call split. A row
+  carrying a *different* `CallSid` is another call and is left alone.
+  A notification's `SipCallId` is only a lookup key; it is never
+  written onto a recording's row.
+- A restarted recording (a second SIPREC dialog for the same `CallSid`
+  or FreeSWITCH UUID) attaches to the same call: its legs join the
+  first dialog's, and the call's duration sums the dialogs.
 
 ```sh
 # Form-encoded (the VoiceML/Twilio webhook shape)
@@ -517,7 +526,8 @@ or the merge of both:
 - AMD: `amd_answered_by`, `amd_duration_ms`, `amd_call_status`,
   `amd_notified_at`, `amd_raw`
 
-`legs` — one row per recorded stream: `label`, `codec`,
+`legs` — one row per recorded stream: `sip_call_id` (the SIPREC
+dialog that recorded it), `label`, `codec`,
 `participant_aor`, `wav_path`, `duration_sec`, `write_error`. Files
 live in `RECORDING_DIR` under random names; deleting a call in the
 UI deletes its rows and files.
@@ -572,8 +582,8 @@ What the tests prove (no FreeSWITCH needed):
   silence; ports recycle FIFO.
 - `internal/store` — two legs merge into one call; AMD-after-recording
   updates; AMD-before-recording is adopted by `CallSid`; keyless AMD is
-  rejected; a second dialog carrying an owned `CallSid` records under
-  its own Call-ID instead of failing; search wildcards match
+  rejected; a second dialog for the same `CallSid` joins the call;
+  rows split across keys fold into one; search wildcards match
   literally; user CRUD; delete returns the WAV paths; pre-rename
   databases migrate (table/column renames) with data intact.
 - `internal/web` / `internal/auth` — notify endpoint auth (401/400/200)

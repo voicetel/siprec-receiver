@@ -328,10 +328,21 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 	// Columns added after v0.1.0 for databases that already exist.
 	for _, col := range []struct{ name, ddl string }{
 		{"write_error", `ALTER TABLE legs ADD COLUMN write_error TEXT NOT NULL DEFAULT ''`},
+		{"sip_call_id", `ALTER TABLE legs ADD COLUMN sip_call_id TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfMissing(ctx, "legs", col.name, col.ddl); err != nil {
 			return err
 		}
+	}
+
+	// Each leg names the SIPREC dialog that recorded it, so a call can
+	// hold several dialogs (a restarted recording). Legs from before
+	// that belong to their call's dialog.
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE legs SET sip_call_id = COALESCE((SELECT sip_call_id FROM calls WHERE calls.id = legs.call_id), '')
+WHERE sip_call_id = '';
+CREATE INDEX IF NOT EXISTS idx_legs_sip_call_id ON legs(sip_call_id);`); err != nil {
+		return fmt.Errorf("store: migrate leg dialogs: %w", err)
 	}
 
 	for _, col := range []struct{ name, ddl string }{
@@ -475,99 +486,40 @@ func (s *Store) RecordLeg(ctx context.Context, leg siprecsrv.FinalizedLeg) error
 
 	defer func() { _ = tx.Rollback() }()
 
-	// If a DIFFERENT dialog's row already owns this CallSid (a second
-	// SIPREC session for the same call — re-record after a transfer,
-	// an SRC restart), this session must not claim or collide with
-	// that row: record it under its own SIP Call-ID without the
-	// CallSid key. The first dialog keeps the CallSid correlation.
-	insertCallSid := leg.CallSid
-
-	if leg.CallSid != "" {
-		var ownerSipID string
-
-		oerr := tx.QueryRowContext(ctx,
-			`SELECT COALESCE(sip_call_id, '') FROM calls WHERE call_sid = ?`,
-			leg.CallSid).Scan(&ownerSipID)
-		switch {
-		case oerr == nil && ownerSipID != "" && ownerSipID != leg.CallID:
-			insertCallSid = ""
-		case oerr != nil && !errors.Is(oerr, sql.ErrNoRows):
-			return fmt.Errorf("store: check call_sid owner: %w", oerr)
-		}
-	}
-
-	// Claim any AMD-first placeholder row for this call (matched by
-	// CallSid or FsUUID) by stamping it with our SIP Call-ID, so the
-	// upsert below refreshes that row — AMD fields and all — instead
-	// of colliding with its UNIQUE call_sid.
-	if leg.CallSid != "" && insertCallSid != "" {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE calls SET sip_call_id = ? WHERE call_sid = ? AND sip_call_id IS NULL`,
-			leg.CallID, leg.CallSid); err != nil {
-			return fmt.Errorf("store: claim amd placeholder by call_sid: %w", err)
-		}
-	}
-
-	if leg.FsUUID != "" {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE calls SET sip_call_id = ? WHERE sip_call_id IS NULL AND id =
-				(SELECT id FROM calls WHERE fs_uuid = ? AND sip_call_id IS NULL LIMIT 1)`,
-			leg.CallID, leg.FsUUID); err != nil {
-			return fmt.Errorf("store: claim amd placeholder by fs_uuid: %w", err)
-		}
-	}
-
-	// Create or refresh the recording-owned fields. AMD-owned fields
-	// are deliberately not touched here; the merge step below adopts
-	// them from a placeholder row if one exists.
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_uri,
-	from_number, to_number, started_at, ended_at, duration_sec, status,
-	metadata_json, metadata_xml, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?)
-ON CONFLICT(sip_call_id) DO UPDATE SET
-	call_sid      = COALESCE(calls.call_sid, excluded.call_sid),
-	fs_uuid       = CASE WHEN excluded.fs_uuid != '' THEN excluded.fs_uuid ELSE calls.fs_uuid END,
-	account_sid   = CASE WHEN excluded.account_sid != '' THEN excluded.account_sid ELSE calls.account_sid END,
-	from_uri      = CASE WHEN excluded.from_uri != '' THEN excluded.from_uri ELSE calls.from_uri END,
-	from_number   = CASE WHEN excluded.from_number != '' THEN excluded.from_number ELSE calls.from_number END,
-	to_number     = CASE WHEN excluded.to_number != '' THEN excluded.to_number ELSE calls.to_number END,
-	ended_at      = excluded.ended_at,
-	duration_sec  = MAX(calls.duration_sec, excluded.duration_sec),
-	status        = 'completed',
-	metadata_json = CASE WHEN excluded.metadata_json != '' THEN excluded.metadata_json ELSE calls.metadata_json END,
-	metadata_xml  = CASE WHEN excluded.metadata_xml != '' THEN excluded.metadata_xml ELSE calls.metadata_xml END,
-	updated_at    = excluded.updated_at;`,
-		leg.CallID, nullIfEmpty(insertCallSid), leg.FsUUID, leg.AccountSid, leg.FromURI,
-		fromNumber, toNumber, millis(leg.StartedAt), millis(now), leg.DurationSec,
-		metaJSON, leg.MetadataXML, millis(now), millis(now))
+	// One row per call: this dialog's own row, a row an earlier
+	// notification created under the CallSid or FsUUID, or the row an
+	// earlier SIPREC dialog of the same call recorded into (a restarted
+	// recording), all folded into one.
+	callPK, err := resolveCall(ctx, tx, callKeys{CallSid: leg.CallSid, SipCallID: leg.CallID, FsUUID: leg.FsUUID})
 	if err != nil {
-		return fmt.Errorf("store: upsert call %s: %w", leg.CallID, err)
+		return err
 	}
 
-	var callPK int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT id FROM calls WHERE sip_call_id = ?`, leg.CallID).Scan(&callPK); err != nil {
-		return fmt.Errorf("store: lookup call %s: %w", leg.CallID, err)
+	if callPK == 0 {
+		callPK, err = insertRecordedCall(ctx, tx, leg, fromNumber, toNumber, metaJSON, now)
+	} else {
+		err = refreshRecordedCall(ctx, tx, callPK, leg, fromNumber, toNumber, metaJSON, now)
 	}
 
-	// Adopt AMD data from a placeholder row created by an earlier
-	// notification (matched by CallSid or FsUUID), then remove it.
-	if err := mergePlaceholder(ctx, tx, callPK, leg.CallSid, leg.FsUUID); err != nil {
+	if err != nil {
 		return err
 	}
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO legs (call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO legs (call_id, sip_call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(call_id, wav_path) DO UPDATE SET
-	label = excluded.label, codec = excluded.codec,
+	label = excluded.label, codec = excluded.codec, sip_call_id = excluded.sip_call_id,
 	participant_aor = excluded.participant_aor, duration_sec = excluded.duration_sec,
 	write_error = excluded.write_error;`,
-		callPK, leg.Label, leg.Codec, participantForLabel(leg.Metadata, leg.Label),
+		callPK, leg.CallID, leg.Label, leg.Codec, participantForLabel(leg.Metadata, leg.Label),
 		leg.WAVPath, leg.DurationSec, leg.WriteErr, millis(now))
 	if err != nil {
 		return fmt.Errorf("store: insert leg %s: %w", leg.Label, err)
+	}
+
+	if err := refreshDuration(ctx, tx, callPK); err != nil {
+		return err
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -577,63 +529,71 @@ ON CONFLICT(call_id, wav_path) DO UPDATE SET
 	return nil
 }
 
-// mergePlaceholder folds an AMD-first placeholder row (a different row
-// sharing callSid or fsUUID) into the recording row callPK and deletes
-// the placeholder. No-op when there is none.
-func mergePlaceholder(ctx context.Context, tx *sql.Tx, callPK int64, callSid, fsUUID string) error {
-	var otherID int64
-
-	var amdBy, amdStatus, amdRaw string
-
-	var amdDurMs int
-
-	var amdAt, startedAt int64
-
-	find := func(query string, arg string) error {
-		return tx.QueryRowContext(ctx, query, arg, callPK).Scan(
-			&otherID, &amdBy, &amdDurMs, &amdStatus, &amdRaw, &amdAt, &startedAt)
-	}
-
-	err := sql.ErrNoRows
-	if callSid != "" {
-		err = find(`SELECT id, amd_answered_by, amd_duration_ms, amd_call_status, amd_raw,
-			amd_notified_at, started_at FROM calls
-			WHERE call_sid = ? AND id != ? AND sip_call_id IS NULL ORDER BY started_at DESC LIMIT 1`, callSid)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) && fsUUID != "" {
-		err = find(`SELECT id, amd_answered_by, amd_duration_ms, amd_call_status, amd_raw,
-			amd_notified_at, started_at FROM calls
-			WHERE fs_uuid = ? AND id != ? AND sip_call_id IS NULL ORDER BY started_at DESC LIMIT 1`, fsUUID)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-
+// insertRecordedCall creates the row for a recording no earlier event
+// named. The dialog's Call-ID becomes its sip_call_id unless another
+// row (one carrying a different CallSid) already holds it; the leg
+// rows keep the dialog either way.
+func insertRecordedCall(ctx context.Context, tx *sql.Tx, leg siprecsrv.FinalizedLeg,
+	fromNumber, toNumber, metaJSON string, now time.Time,
+) (int64, error) {
+	res, err := tx.ExecContext(ctx, `
+INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_uri,
+	from_number, to_number, started_at, ended_at, duration_sec, status,
+	metadata_json, metadata_xml, created_at, updated_at)
+VALUES (CASE WHEN EXISTS (SELECT 1 FROM calls WHERE sip_call_id = ?) THEN NULL ELSE ? END,
+	?, ?, ?, ?, ?, ?, ?, ?, 0, 'completed', ?, ?, ?, ?)`,
+		leg.CallID, leg.CallID, nullIfEmpty(leg.CallSid), leg.FsUUID, leg.AccountSid, leg.FromURI,
+		fromNumber, toNumber, millis(leg.StartedAt), millis(now),
+		metaJSON, leg.MetadataXML, millis(now), millis(now))
 	if err != nil {
-		return fmt.Errorf("store: find amd placeholder: %w", err)
+		return 0, fmt.Errorf("store: insert call %s: %w", leg.CallID, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-UPDATE calls SET amd_answered_by = ?, amd_duration_ms = ?, amd_call_status = ?,
-	amd_raw = ?, amd_notified_at = ?, updated_at = ?
-WHERE id = ? AND amd_answered_by = '';`,
-		amdBy, amdDurMs, amdStatus, amdRaw, amdAt, millis(time.Now().UTC()), callPK); err != nil {
-		return fmt.Errorf("store: adopt amd placeholder: %w", err)
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("store: insert call %s id: %w", leg.CallID, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM calls WHERE id = ?`, otherID); err != nil {
-		return fmt.Errorf("store: delete amd placeholder: %w", err)
+	return id, nil
+}
+
+// refreshRecordedCall writes the recording-owned fields onto the call's
+// existing row. AMD, disposition and fetched-record fields are left as
+// the notifications set them.
+func refreshRecordedCall(ctx context.Context, tx *sql.Tx, id int64, leg siprecsrv.FinalizedLeg,
+	fromNumber, toNumber, metaJSON string, now time.Time,
+) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE calls SET
+	sip_call_id   = CASE WHEN sip_call_id IS NULL AND NOT EXISTS (SELECT 1 FROM calls WHERE sip_call_id = ?)
+		THEN ? ELSE sip_call_id END,
+	fs_uuid       = CASE WHEN ? != '' THEN ? ELSE fs_uuid END,
+	account_sid   = CASE WHEN ? != '' THEN ? ELSE account_sid END,
+	from_uri      = CASE WHEN ? != '' THEN ? ELSE from_uri END,
+	from_number   = CASE WHEN ? != '' THEN ? ELSE from_number END,
+	to_number     = CASE WHEN ? != '' THEN ? ELSE to_number END,
+	started_at    = CASE WHEN started_at = 0 THEN ? ELSE started_at END,
+	ended_at      = MAX(ended_at, ?),
+	status        = 'completed',
+	metadata_json = CASE WHEN ? != '' THEN ? ELSE metadata_json END,
+	metadata_xml  = CASE WHEN ? != '' THEN ? ELSE metadata_xml END,
+	updated_at    = ?
+WHERE id = ?`,
+		leg.CallID, leg.CallID, leg.FsUUID, leg.FsUUID, leg.AccountSid, leg.AccountSid,
+		leg.FromURI, leg.FromURI, fromNumber, fromNumber, toNumber, toNumber,
+		millis(leg.StartedAt), millis(now), metaJSON, metaJSON,
+		leg.MetadataXML, leg.MetadataXML, millis(now), id)
+	if err != nil {
+		return fmt.Errorf("store: update call %d: %w", id, err)
 	}
 
 	return nil
 }
 
-// ApplyAMD logs one AMD disposition, updating the matching call row
-// (by CallSid, then SIP Call-ID, then FsUUID) or inserting an
-// AMD-only placeholder row. Returns the row id and whether an existing
-// row was matched.
+// ApplyAMD logs one AMD disposition onto the call's row (found by
+// CallSid, SIP dialog Call-ID, or FsUUID, with any rows those keys name
+// merged into one) or inserts an AMD-only placeholder row. Returns the
+// row id and whether an existing row was matched.
 func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, error) {
 	if n.CallSid == "" && n.SipCallID == "" && n.FsUUID == "" {
 		return 0, false, ErrNoKey
@@ -651,49 +611,22 @@ func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, e
 
 	defer func() { _ = tx.Rollback() }()
 
-	var id int64
-
-	find := func(query string, arg string) error {
-		return tx.QueryRowContext(ctx, query, arg).Scan(&id)
+	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID})
+	if err != nil {
+		return 0, false, err
 	}
 
-	err := sql.ErrNoRows
-	if n.CallSid != "" {
-		err = find(`SELECT id FROM calls WHERE call_sid = ?`, n.CallSid)
-	}
+	matched := id != 0
 
-	if errors.Is(err, sql.ErrNoRows) && n.SipCallID != "" {
-		err = find(`SELECT id FROM calls WHERE sip_call_id = ?`, n.SipCallID)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) && n.FsUUID != "" {
-		err = find(`SELECT id FROM calls WHERE fs_uuid = ? ORDER BY started_at DESC LIMIT 1`, n.FsUUID)
-	}
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, false, fmt.Errorf("store: amd lookup: %w", err)
-	}
-
-	if err == nil {
-		// Never steal a CallSid another row owns, and never stamp a
-		// SIP Call-ID onto a row whose CallSid names a different call.
-		effCallSid := n.CallSid
-		if effCallSid != "" {
-			var ownerID int64
-			if oerr := tx.QueryRowContext(ctx,
-				`SELECT id FROM calls WHERE call_sid = ?`, effCallSid).Scan(&ownerID); oerr == nil && ownerID != id {
-				effCallSid = ""
-			}
-		}
-
-		_, uerr := tx.ExecContext(ctx, `
+	if matched {
+		// The SIP Call-ID is only a lookup key here: a recording owns its
+		// row's sip_call_id, and a notification's may name another dialog
+		// (a carrier leg's) entirely.
+		_, err = tx.ExecContext(ctx, `
 UPDATE calls SET
 	amd_answered_by = ?, amd_duration_ms = ?, amd_call_status = ?,
 	amd_raw = ?, amd_notified_at = ?,
-	call_sid    = COALESCE(call_sid, ?),
-	sip_call_id = CASE WHEN COALESCE(call_sid, '') = '' OR call_sid = ?
-		THEN COALESCE(sip_call_id, ?) ELSE sip_call_id END,
-	fs_uuid     = CASE WHEN fs_uuid = '' THEN ? ELSE fs_uuid END,
+	fs_uuid     = CASE WHEN COALESCE(fs_uuid, '') = '' THEN ? ELSE fs_uuid END,
 	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
 	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
@@ -701,41 +634,45 @@ UPDATE calls SET
 	updated_at  = ?
 WHERE id = ?;`,
 			n.AnsweredBy, n.DurationMs, n.CallStatus, n.Raw, millis(now),
-			nullIfEmpty(effCallSid), n.CallSid, nullIfEmpty(n.SipCallID), n.FsUUID,
-			n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
-		if uerr != nil {
-			return 0, false, fmt.Errorf("store: amd update %d: %w", id, uerr)
+			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
+		if err != nil {
+			return 0, false, fmt.Errorf("store: amd update %d: %w", id, err)
 		}
-
-		if cerr := tx.Commit(); cerr != nil {
-			return 0, false, fmt.Errorf("store: amd commit: %w", cerr)
-		}
-
-		return id, true, nil
-	}
-
-	res, ierr := tx.ExecContext(ctx, `
-INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
+	} else {
+		id, err = insertNotified(ctx, tx, n.SipCallID, `INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, amd_answered_by, amd_duration_ms,
 	amd_call_status, amd_notified_at, amd_raw, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?);`,
-		nullIfEmpty(n.SipCallID), nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
-		n.From, n.To, n.Direction, millis(now), n.AnsweredBy, n.DurationMs,
-		n.CallStatus, millis(now), n.Raw, millis(now), millis(now))
-	if ierr != nil {
-		return 0, false, fmt.Errorf("store: amd insert: %w", ierr)
-	}
-
-	newID, ierr := res.LastInsertId()
-	if ierr != nil {
-		return 0, false, fmt.Errorf("store: amd insert id: %w", ierr)
+VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?);`,
+			nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
+			n.From, n.To, n.Direction, millis(now), n.AnsweredBy, n.DurationMs,
+			n.CallStatus, millis(now), n.Raw, millis(now), millis(now))
+		if err != nil {
+			return 0, false, fmt.Errorf("store: amd insert: %w", err)
+		}
 	}
 
 	if cerr := tx.Commit(); cerr != nil {
 		return 0, false, fmt.Errorf("store: amd commit: %w", cerr)
 	}
 
-	return newID, false, nil
+	return id, matched, nil
+}
+
+// sipCallIDValue is the SQL value expression a notification placeholder
+// uses for sip_call_id: the notification's SIP Call-ID, so a recording
+// of that dialog later finds the row, unless another row (one with a
+// different CallSid) already holds it.
+const sipCallIDValue = `CASE WHEN ? = '' OR EXISTS (SELECT 1 FROM calls WHERE sip_call_id = ?) THEN NULL ELSE ? END`
+
+// insertNotified inserts a notification placeholder row. query's first
+// value is sipCallIDValue; args are the remaining columns' values.
+func insertNotified(ctx context.Context, tx *sql.Tx, sipCallID, query string, args ...any) (int64, error) {
+	res, err := tx.ExecContext(ctx, query, append([]any{sipCallID, sipCallID, sipCallID}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+
+	return res.LastInsertId()
 }
 
 // ListFilter narrows ListCalls. Empty fields match everything.
@@ -761,9 +698,10 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 		where += ` AND (from_number LIKE ? ESCAPE '\' OR to_number LIKE ? ESCAPE '\'
 			OR call_sid LIKE ? ESCAPE '\' OR sip_call_id LIKE ? ESCAPE '\'
 			OR fs_uuid LIKE ? ESCAPE '\' OR account_sid LIKE ? ESCAPE '\'
-			OR amd_answered_by LIKE ? ESCAPE '\' OR disp_status LIKE ? ESCAPE '\')`
+			OR amd_answered_by LIKE ? ESCAPE '\' OR disp_status LIKE ? ESCAPE '\'
+			OR id IN (SELECT call_id FROM legs WHERE sip_call_id LIKE ? ESCAPE '\'))`
 		like := "%" + escapeLike(f.Query) + "%"
-		args = append(args, like, like, like, like, like, like, like, like)
+		args = append(args, like, like, like, like, like, like, like, like, like)
 	}
 
 	if f.From != "" {
@@ -1121,7 +1059,7 @@ type DispositionNotification struct {
 }
 
 // ApplyDisposition logs one final call outcome, with the same
-// match-or-placeholder upsert semantics as ApplyAMD. A disposition
+// resolve-merge-or-placeholder semantics as ApplyAMD. A disposition
 // that carries AnsweredBy also fills the AMD fields when they are
 // still empty (the terminal StatusCallback repeats the verdict).
 func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification) (int64, bool, error) {
@@ -1138,30 +1076,12 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 
 	defer func() { _ = tx.Rollback() }()
 
-	var id int64
-
-	find := func(query string, arg string) error {
-		return tx.QueryRowContext(ctx, query, arg).Scan(&id)
+	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID})
+	if err != nil {
+		return 0, false, err
 	}
 
-	err := sql.ErrNoRows
-	if n.CallSid != "" {
-		err = find(`SELECT id FROM calls WHERE call_sid = ?`, n.CallSid)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) && n.SipCallID != "" {
-		err = find(`SELECT id FROM calls WHERE sip_call_id = ?`, n.SipCallID)
-	}
-
-	if errors.Is(err, sql.ErrNoRows) && n.FsUUID != "" {
-		err = find(`SELECT id FROM calls WHERE fs_uuid = ? ORDER BY started_at DESC LIMIT 1`, n.FsUUID)
-	}
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return 0, false, fmt.Errorf("store: disposition lookup: %w", err)
-	}
-
-	if err == nil {
+	if id != 0 {
 		var priorStatus string
 		var priorSeq sql.NullInt64
 		var priorAt int64
@@ -1169,47 +1089,15 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 			Scan(&priorStatus, &priorSeq, &priorAt); err != nil {
 			return 0, false, fmt.Errorf("store: disposition order lookup: %w", err)
 		}
-		if staleDisposition(priorStatus, priorSeq, priorAt, n) {
-			return id, true, nil // transaction rolls back without changing the final outcome
-		}
-		effCallSid := n.CallSid
-		if effCallSid != "" {
-			var ownerID int64
-			if oerr := tx.QueryRowContext(ctx,
-				`SELECT id FROM calls WHERE call_sid = ?`, effCallSid).Scan(&ownerID); oerr == nil && ownerID != id {
-				effCallSid = ""
+
+		if !staleDisposition(priorStatus, priorSeq, priorAt, n) {
+			if err := updateDisposition(ctx, tx, id, n, now); err != nil {
+				return 0, false, err
 			}
 		}
 
-		_, uerr := tx.ExecContext(ctx, `
-UPDATE calls SET
-	disp_status = ?, disp_duration_sec = ?, disp_sip_code = ?,
-	disp_error_code = ?, disp_error_message = ?, disp_raw = ?,
-	disp_notified_at = ?,
-	disp_sequence = COALESCE(?, disp_sequence),
-	disp_event_at = CASE WHEN ? > 0 THEN ? ELSE disp_event_at END,
-	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
-	amd_call_status = CASE WHEN amd_call_status = '' THEN ? ELSE amd_call_status END,
-	amd_notified_at = CASE WHEN amd_notified_at = 0 AND ? != '' THEN ? ELSE amd_notified_at END,
-	call_sid    = COALESCE(call_sid, ?),
-	sip_call_id = CASE WHEN COALESCE(call_sid, '') = '' OR call_sid = ?
-		THEN COALESCE(sip_call_id, ?) ELSE sip_call_id END,
-	fs_uuid     = CASE WHEN fs_uuid = '' THEN ? ELSE fs_uuid END,
-	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
-	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
-	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
-	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
-	updated_at  = ?
-WHERE id = ?;`,
-			n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
-			n.Raw, millis(now), n.SequenceNumber, millis(n.Timestamp), millis(n.Timestamp),
-			n.AnsweredBy, n.CallStatus, n.AnsweredBy,
-			millis(now), nullIfEmpty(effCallSid), n.CallSid, nullIfEmpty(n.SipCallID),
-			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
-		if uerr != nil {
-			return 0, false, fmt.Errorf("store: disposition update %d: %w", id, uerr)
-		}
-
+		// A stale event changes no outcome, but any rows its keys named
+		// are merged either way.
 		if cerr := tx.Commit(); cerr != nil {
 			return 0, false, fmt.Errorf("store: disposition commit: %w", cerr)
 		}
@@ -1222,31 +1110,57 @@ WHERE id = ?;`,
 		amdAt = millis(now)
 	}
 
-	res, ierr := tx.ExecContext(ctx, `
+	id, err = insertNotified(ctx, tx, n.SipCallID, `
 INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, disp_status, disp_duration_sec,
 	disp_sip_code, disp_error_code, disp_error_message, disp_notified_at,
 	disp_raw, amd_answered_by, amd_call_status, amd_notified_at,
-		created_at, updated_at, disp_sequence, disp_event_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
-		nullIfEmpty(n.SipCallID), nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
+	created_at, updated_at, disp_sequence, disp_event_at)
+VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+		nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
 		n.From, n.To, n.Direction, millis(now), n.CallStatus, n.DurationSec,
 		n.SipCode, n.ErrorCode, n.ErrorMessage, millis(now), n.Raw,
 		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now), n.SequenceNumber, millis(n.Timestamp))
-	if ierr != nil {
-		return 0, false, fmt.Errorf("store: disposition insert: %w", ierr)
-	}
-
-	newID, ierr := res.LastInsertId()
-	if ierr != nil {
-		return 0, false, fmt.Errorf("store: disposition insert id: %w", ierr)
+	if err != nil {
+		return 0, false, fmt.Errorf("store: disposition insert: %w", err)
 	}
 
 	if cerr := tx.Commit(); cerr != nil {
 		return 0, false, fmt.Errorf("store: disposition commit: %w", cerr)
 	}
 
-	return newID, false, nil
+	return id, false, nil
+}
+
+// updateDisposition writes a newer outcome onto row id. As in ApplyAMD
+// the SIP Call-ID is only a lookup key.
+func updateDisposition(ctx context.Context, tx *sql.Tx, id int64, n DispositionNotification, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE calls SET
+	disp_status = ?, disp_duration_sec = ?, disp_sip_code = ?,
+	disp_error_code = ?, disp_error_message = ?, disp_raw = ?,
+	disp_notified_at = ?,
+	disp_sequence = COALESCE(?, disp_sequence),
+	disp_event_at = CASE WHEN ? > 0 THEN ? ELSE disp_event_at END,
+	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
+	amd_call_status = CASE WHEN amd_call_status = '' THEN ? ELSE amd_call_status END,
+	amd_notified_at = CASE WHEN amd_notified_at = 0 AND ? != '' THEN ? ELSE amd_notified_at END,
+	fs_uuid     = CASE WHEN COALESCE(fs_uuid, '') = '' THEN ? ELSE fs_uuid END,
+	account_sid = CASE WHEN account_sid = '' THEN ? ELSE account_sid END,
+	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
+	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
+	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
+	updated_at  = ?
+WHERE id = ?;`,
+		n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
+		n.Raw, millis(now), n.SequenceNumber, millis(n.Timestamp), millis(n.Timestamp),
+		n.AnsweredBy, n.CallStatus, n.AnsweredBy, millis(now),
+		n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
+	if err != nil {
+		return fmt.Errorf("store: disposition update %d: %w", id, err)
+	}
+
+	return nil
 }
 
 // VoiceMLRecord is the subset of VoiceML's Call resource the store

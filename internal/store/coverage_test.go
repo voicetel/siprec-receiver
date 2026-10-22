@@ -361,57 +361,74 @@ func TestMigrate_StampVersionFails(t *testing.T) {
 }
 
 func TestRecordLeg_StatementFailures(t *testing.T) {
-	isOp := func(want int, table string) func(int, string, string) bool {
-		return func(op int, arg1, _ string) bool { return op == want && (table == "" || arg1 == table) }
+	isOp := func(want int, table, column string) func(int, string, string) bool {
+		return func(op int, arg1, arg2 string) bool {
+			return op == want && (table == "" || arg1 == table) && (column == "" || arg2 == column)
+		}
 	}
+
+	// seedRow gives the leg's dialog an existing row, so RecordLeg takes
+	// the update path.
+	seedRow := func(t *testing.T, s *Store) { recordSimpleLeg(t, s, "dlg", time.Now()) }
 
 	cases := []struct {
 		name string
+		seed func(*testing.T, *Store)
 		leg  siprecsrv.FinalizedLeg
 		deny func(int, string, string) bool
 		want string
 	}{
-		{
-			"owner check", siprecsrv.FinalizedLeg{CallID: "dlg", CallSid: "CA1"},
-			isOp(sqlite3.SQLITE_SELECT, ""), "check call_sid owner",
-		},
-		{
-			"claim by call_sid", siprecsrv.FinalizedLeg{CallID: "dlg", CallSid: "CA1"},
-			isOp(sqlite3.SQLITE_UPDATE, "calls"), "claim amd placeholder by call_sid",
-		},
-		{
-			"claim by fs_uuid", siprecsrv.FinalizedLeg{CallID: "dlg", FsUUID: "uuid-1"},
-			isOp(sqlite3.SQLITE_UPDATE, "calls"), "claim amd placeholder by fs_uuid",
-		},
-		{
-			"upsert call", siprecsrv.FinalizedLeg{CallID: "dlg"},
-			isOp(sqlite3.SQLITE_INSERT, "calls"), "upsert call dlg",
-		},
-		{
-			"lookup call", siprecsrv.FinalizedLeg{CallID: "dlg"},
-			isOp(sqlite3.SQLITE_SELECT, ""), "lookup call dlg",
-		},
-		{
-			"find placeholder", siprecsrv.FinalizedLeg{CallID: "dlg", FsUUID: "uuid-1"},
-			func(op int, arg1, arg2 string) bool {
-				return op == sqlite3.SQLITE_READ && arg1 == "calls" && arg2 == "amd_raw"
-			}, "find amd placeholder",
-		},
-		{
-			"insert leg", siprecsrv.FinalizedLeg{CallID: "dlg", Label: "mixed"},
-			isOp(sqlite3.SQLITE_INSERT, "legs"), "insert leg mixed",
-		},
+		{"find rows", nil, siprecsrv.FinalizedLeg{CallID: "dlg", CallSid: "CA1"},
+			isOp(sqlite3.SQLITE_SELECT, "", ""), "find call rows"},
+		{"find by dialog", nil, siprecsrv.FinalizedLeg{CallID: "dlg"},
+			isOp(sqlite3.SQLITE_READ, "legs", "sip_call_id"), "find call rows"},
+		{"find by fs_uuid", nil, siprecsrv.FinalizedLeg{CallID: "dlg", FsUUID: "uuid-1"},
+			isOp(sqlite3.SQLITE_READ, "calls", "fs_uuid"), "find call rows"},
+		{"insert call", nil, siprecsrv.FinalizedLeg{CallID: "dlg"},
+			isOp(sqlite3.SQLITE_INSERT, "calls", ""), "insert call dlg"},
+		{"update call", seedRow, siprecsrv.FinalizedLeg{CallID: "dlg"},
+			isOp(sqlite3.SQLITE_UPDATE, "calls", "metadata_xml"), "update call 1"},
+		{"adopt call_sid", func(t *testing.T, s *Store) {
+			mustExec(t, s, `INSERT INTO calls (fs_uuid, status, started_at, created_at, updated_at)
+				VALUES ('uuid-1', 'notified', 1, 1, 1)`)
+		}, siprecsrv.FinalizedLeg{CallID: "dlg", CallSid: "CA1", FsUUID: "uuid-1"},
+			isOp(sqlite3.SQLITE_UPDATE, "calls", "call_sid"), "adopt call_sid"},
+		{"insert leg", nil, siprecsrv.FinalizedLeg{CallID: "dlg", Label: "mixed"},
+			isOp(sqlite3.SQLITE_INSERT, "legs", ""), "insert leg mixed"},
+		{"duration", nil, siprecsrv.FinalizedLeg{CallID: "dlg"},
+			isOp(sqlite3.SQLITE_UPDATE, "calls", "duration_sec"), "call 1 duration"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := openTestStore(t)
+			if tc.seed != nil {
+				tc.seed(t, s)
+			}
 
 			tc.leg.WAVPath = "/rec/fail.wav"
 			denyWhen(t, s, tc.deny)
 			wantErr(t, s.RecordLeg(context.Background(), tc.leg), tc.want)
 		})
 	}
+}
+
+// A mid-iteration failure while reading candidate rows fails the
+// finalize rather than resolving against a partial set.
+func TestRecordLeg_CandidateRowsFail(t *testing.T) {
+	s := openTestStore(t)
+
+	mustExec(t, s, `INSERT INTO calls (fs_uuid, status, started_at, created_at, updated_at)
+		VALUES ('uuid-boom', 'notified', 1, 1, 1)`)
+	addBoom(t, s)
+	mustExec(t, s, `ALTER TABLE calls RENAME TO calls_real`)
+	// fs_uuid evaluates abs(boom.x), which overflows at step time.
+	mustExec(t, s, `CREATE VIEW calls AS SELECT id, call_sid, status, sip_call_id,
+		fs_uuid || substr(abs(boom.x), 1, 0) AS fs_uuid FROM calls_real, boom`)
+
+	wantErr(t, s.RecordLeg(context.Background(), siprecsrv.FinalizedLeg{
+		CallID: "dlg", FsUUID: "uuid-boom", WAVPath: "/rec/x.wav",
+	}), "find call rows")
 }
 
 func TestRecordLeg_CommitFails(t *testing.T) {
@@ -456,18 +473,27 @@ func TestRecordLeg_MergesSecondFsUUIDPlaceholder(t *testing.T) {
 	}
 }
 
-func TestRecordLeg_MergePlaceholderWriteFailures(t *testing.T) {
+func TestRecordLeg_MergeWriteFailures(t *testing.T) {
 	cases := []struct {
 		name string
 		deny func(int, string, string) bool
 		want string
 	}{
-		{"adopt", func(op int, arg1, arg2 string) bool {
-			return op == sqlite3.SQLITE_UPDATE && arg1 == "calls" && arg2 == "amd_raw"
-		}, "adopt amd placeholder"},
+		{"load", func(op int, arg1, arg2 string) bool {
+			return op == sqlite3.SQLITE_READ && arg1 == "calls" && arg2 == "voiceml_fetched_at"
+		}, "load call"},
+		{"move legs", func(op int, arg1, _ string) bool {
+			return op == sqlite3.SQLITE_UPDATE && arg1 == "legs"
+		}, "move legs 2 -> 1"},
 		{"delete", func(op int, arg1, _ string) bool {
 			return op == sqlite3.SQLITE_DELETE && arg1 == "calls"
-		}, "delete amd placeholder"},
+		}, "delete merged call 2"},
+		{"fold", func(op int, arg1, arg2 string) bool {
+			return op == sqlite3.SQLITE_UPDATE && arg1 == "calls" && arg2 == "amd_raw"
+		}, "merge call 2 into 1"},
+		{"duration", func(op int, arg1, arg2 string) bool {
+			return op == sqlite3.SQLITE_UPDATE && arg1 == "calls" && arg2 == "duration_sec"
+		}, "call 1 duration"},
 	}
 
 	for _, tc := range cases {
@@ -575,7 +601,7 @@ func TestNotify_StatementFailures(t *testing.T) {
 			denyWhen(t, s, func(op int, _, _ string) bool { return op == sqlite3.SQLITE_SELECT })
 
 			_, _, err := n.apply(s, "", "", "uuid-x")
-			wantErr(t, err, n.prefix+" lookup")
+			wantErr(t, err, "find call rows")
 		})
 
 		t.Run(n.name+"/update", func(t *testing.T) {

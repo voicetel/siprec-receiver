@@ -2,16 +2,17 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/voicetel/siprec-receiver/internal/siprecsrv"
 )
 
-// A second SIPREC dialog carrying an already-owned CallSid (re-record
-// after a transfer, an SRC restart) must record cleanly under its
-// own SIP Call-ID instead of failing the whole finalize on the
-// UNIQUE(call_sid) index — previously the WAV was left with no row.
+// A second SIPREC dialog for the same CallSid (SIPREC restarted on the
+// call: VoiceML's second <Start><Siprec> replaces the first) records
+// into the same call: both dialogs' legs, the CallSid and its
+// notifications on one row, and the recorded time summed.
 func TestRecordLeg_SecondDialogSameCallSid(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -28,19 +29,45 @@ func TestRecordLeg_SecondDialogSameCallSid(t *testing.T) {
 	}
 
 	calls, total, _ := s.ListCalls(ctx, ListFilter{})
-	if total != 2 || len(calls) != 2 {
-		t.Fatalf("calls = %d, want 2 (one per dialog)", total)
+	if total != 1 || len(calls) != 1 {
+		t.Fatalf("calls = %d, want 1 (both dialogs on the CallSid's row)", total)
 	}
 
-	owners := 0
-	for _, c := range calls {
-		if c.CallSid == callSid {
-			owners++
+	c, err := s.GetCall(ctx, calls[0].ID)
+	if err != nil || c.CallSid != callSid || len(c.Legs) != 2 || c.DurationSec != 10 {
+		t.Fatalf("call = %+v (%v), want CallSid, 2 legs, 10 s", c, err)
+	}
+
+	// A notification keyed by the second dialog's Call-ID finds it.
+	id, matched, err := s.ApplyAMD(ctx, AMDNotification{SipCallID: "dlg-second", AnsweredBy: "human"})
+	if err != nil || !matched || id != c.ID {
+		t.Fatalf("AMD by second dialog: id=%d matched=%v err=%v, want call %d", id, matched, err, c.ID)
+	}
+
+	// Searching by the second dialog's Call-ID finds the call too.
+	if _, n, _ := s.ListCalls(ctx, ListFilter{Query: "dlg-second"}); n != 1 {
+		t.Errorf("search by second dialog = %d calls, want 1", n)
+	}
+}
+
+// Two separate-stream legs of one dialog run side by side: the call
+// lasts as long as the longer one, not their sum.
+func TestRecordLeg_SeparateStreamLegsDoNotSum(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	for i, d := range []int{7, 6} {
+		if err := s.RecordLeg(ctx, siprecsrv.FinalizedLeg{
+			CallID: "dlg-sep", Label: fmt.Sprint("leg", i), WAVPath: fmt.Sprintf("/rec/sep%d.wav", i),
+			DurationSec: d, StartedAt: time.Now(),
+		}); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	if owners != 1 {
-		t.Errorf("rows owning the CallSid = %d, want exactly 1 (the first dialog)", owners)
+	calls, _, _ := s.ListCalls(ctx, ListFilter{})
+	if len(calls) != 1 || calls[0].DurationSec != 7 {
+		t.Fatalf("calls = %+v, want one call of 7 s", calls)
 	}
 }
 
