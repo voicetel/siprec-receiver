@@ -456,9 +456,11 @@ func (s *Server) ServeTLS(ctx context.Context, addr string, conf *tls.Config) er
 	return srv.ListenAndServeTLS(ctx, "tcp", addr, conf)
 }
 
-// contactFor builds this listener's Contact URI (RFC 3261 §12.1.1
-// requires one in 2xx responses to INVITE, or strict clients cannot
-// address in-dialog requests to us).
+// contactFor builds this listener's Contact header value. RFC 3261
+// §12.1.1 requires a Contact in 2xx responses to INVITE (or strict
+// clients cannot address in-dialog requests to us), with a sips: URI
+// when the dialog runs over TLS; RFC 7866 §6.2 requires the SRS to mark
+// it with the +sip.srs feature tag.
 func contactFor(localIP, transport, addr string) string {
 	host := localIP
 
@@ -475,7 +477,11 @@ func contactFor(localIP, transport, addr string) string {
 		}
 	}
 
-	return fmt.Sprintf("<sip:srs@%s:%s;transport=%s>", host, port, transport)
+	if transport == "tls" {
+		return fmt.Sprintf("<sips:srs@%s:%s>;+sip.srs", host, port)
+	}
+
+	return fmt.Sprintf("<sip:srs@%s:%s;transport=%s>;+sip.srs", host, port, transport)
 }
 
 // Shutdown finalizes every active session (as if each dialog had

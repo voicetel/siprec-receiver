@@ -130,8 +130,8 @@ func TestHardening_ContactAndDialogChecks(t *testing.T) {
 	}
 
 	contact := res.GetHeader("Contact")
-	if contact == nil || !strings.Contains(contact.Value(), "sip:srs@") {
-		t.Fatalf("200 OK Contact = %v, want our sip:srs@ URI", contact)
+	if contact == nil || !strings.Contains(contact.Value(), "sip:srs@") || !strings.HasSuffix(contact.Value(), ";+sip.srs") {
+		t.Fatalf("200 OK Contact = %v, want our sip:srs@ URI tagged +sip.srs", contact)
 	}
 
 	// BYE from a different dialog (wrong From-tag): 481, no finalize.

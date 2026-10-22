@@ -47,7 +47,7 @@ endpoint, and the web UI are new in this repository.
 | Concept | Spec | Status |
 |---|---|---|
 | SIPREC INVITE with multipart SDP + RS-Metadata | [RFC 7866 §6.1.2][rfc7866-6.1] / [RFC 2046][rfc2046] | ✅ SDP part required; metadata part optional (recording proceeds with positional leg labels) |
-| `Require: siprec` / `+sip.src` handling | [RFC 7866 §6.1][rfc7866-6.1] | ✅ Accepted (no special handling needed server-side) |
+| `Require: siprec` / `+sip.src` handling | [RFC 7866 §6.2][rfc7866-6.2] | ✅ Accepted; the SRS's own Contact carries `+sip.srs` (a `sips:` URI on the TLS listener) |
 | Answer shape | [RFC 7866 §7][rfc7866-7] | ✅ Plain `application/sdp` 200 OK (never multipart), one `recvonly` `m=audio` per offered stream, `a=label` echoed |
 | Mixed (single-stream) recording | [RFC 7866 §7][rfc7866-7] | ✅ One WAV leg per call (both directions already mixed by the SRC) |
 | Separate RX/TX streams | [RFC 7866 §7][rfc7866-7] / [§8.5][rfc7866-8.5] | ✅ Two WAV legs per call, labelled from RS-Metadata participants |
@@ -65,6 +65,7 @@ endpoint, and the web UI are new in this repository.
 | IPv6 | [RFC 4566 §5.7][rfc4566] | ❌ SDP answers advertise IPv4 (`c=IN IP4`); run the SRS on IPv4 |
 
 [rfc7866-6.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.1
+[rfc7866-6.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.2
 [rfc7866-6.4]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.4
 [rfc7866-7]: https://datatracker.ietf.org/doc/html/rfc7866#section-7
 [rfc7866-8.5]: https://datatracker.ietf.org/doc/html/rfc7866#section-8.5

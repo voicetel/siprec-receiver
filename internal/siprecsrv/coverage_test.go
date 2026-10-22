@@ -389,10 +389,12 @@ func TestCov_FinalizeSessionErrorsAndNilFinalizer(t *testing.T) {
 
 func TestCov_ContactFor(t *testing.T) {
 	cases := []struct{ ip, tp, addr, want string }{
-		{"10.0.0.5", "udp", "no-port", "<sip:srs@10.0.0.5:5060;transport=udp>"},
-		{"", "tcp", "192.0.2.1:5070", "<sip:srs@192.0.2.1:5070;transport=tcp>"},
-		{"0.0.0.0", "tcp", "0.0.0.0:5070", "<sip:srs@127.0.0.1:5070;transport=tcp>"},
-		{"::", "tls", "[::]:5061", "<sip:srs@127.0.0.1:5061;transport=tls>"},
+		// RFC 7866 §6.2: the SRS's Contact carries +sip.srs; RFC 3261
+		// §12.1.1: a TLS dialog's Contact is a sips: URI.
+		{"10.0.0.5", "udp", "no-port", "<sip:srs@10.0.0.5:5060;transport=udp>;+sip.srs"},
+		{"", "tcp", "192.0.2.1:5070", "<sip:srs@192.0.2.1:5070;transport=tcp>;+sip.srs"},
+		{"0.0.0.0", "tcp", "0.0.0.0:5070", "<sip:srs@127.0.0.1:5070;transport=tcp>;+sip.srs"},
+		{"::", "tls", "[::]:5061", "<sips:srs@127.0.0.1:5061>;+sip.srs"},
 	}
 	for _, tc := range cases {
 		if got := contactFor(tc.ip, tc.tp, tc.addr); got != tc.want {
