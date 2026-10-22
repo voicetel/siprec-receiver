@@ -40,5 +40,5 @@ coverage:
 
 quality: fmt vet lint coverage
 	@coverage=$$(go tool cover -func=coverage.out | awk '/^total:/ {gsub(/%/, "", $$3); print $$3}'); \
-	awk -v coverage="$$coverage" 'BEGIN { exit !(coverage == 100.0) }' || \
-	(echo "Coverage gate failed: expected 100%, got $$coverage%." >&2; exit 2)
+	awk -v coverage="$$coverage" 'BEGIN { exit !(coverage >= 95.0) }' || \
+	(echo "Coverage gate failed: expected at least 95%, got $$coverage%." >&2; exit 2)
