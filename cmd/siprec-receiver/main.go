@@ -58,6 +58,7 @@ type config struct {
 	HostedDomain   string
 	SessionSecret  string
 	AdminEmail     string
+	AdminGoogleSub string
 	NotifySecret   string
 	DevAuthEmail   string
 	RetentionDays  int
@@ -156,6 +157,7 @@ func loadConfig() (config, error) {
 		HostedDomain:   os.Getenv("GOOGLE_HOSTED_DOMAIN"),
 		SessionSecret:  os.Getenv("SESSION_SECRET"),
 		AdminEmail:     os.Getenv("ADMIN_EMAIL"),
+		AdminGoogleSub: strings.TrimSpace(os.Getenv("ADMIN_GOOGLE_SUB")),
 		NotifySecret:   os.Getenv("NOTIFY_SECRET"),
 		DevAuthEmail:   os.Getenv("DEV_AUTH_EMAIL"),
 		RetentionDays:  envInt("RETENTION_DAYS", 0),
@@ -399,13 +401,14 @@ func main() {
 	}
 
 	authn := auth.New(auth.Config{
-		ClientID:      cfg.GoogleID,
-		ClientSecret:  cfg.GoogleSecret,
-		RedirectURL:   cfg.PublicBaseURL + "/auth/callback",
-		SessionSecret: cfg.SessionSecret,
-		AdminEmail:    cfg.AdminEmail,
-		HostedDomain:  cfg.HostedDomain,
-		DevEmail:      cfg.DevAuthEmail,
+		ClientID:       cfg.GoogleID,
+		ClientSecret:   cfg.GoogleSecret,
+		RedirectURL:    cfg.PublicBaseURL + "/auth/callback",
+		SessionSecret:  cfg.SessionSecret,
+		AdminEmail:     cfg.AdminEmail,
+		AdminGoogleSub: cfg.AdminGoogleSub,
+		HostedDomain:   cfg.HostedDomain,
+		DevEmail:       cfg.DevAuthEmail,
 	}, st)
 
 	webSrv, err := web.New(st, authn, cfg.RecordingDir, cfg.NotifySecret, cfg.VoiceMLBaseURL, cfg.RetentionDays)

@@ -69,8 +69,12 @@ type Config struct {
 	RedirectURL   string // e.g. https://srs.example.com/auth/callback
 	SessionSecret string
 	AdminEmail    string
-	HostedDomain  string
-	DevEmail      string
+	// AdminGoogleSub, when set, pins the bootstrap admin to that Google
+	// account ID (ADMIN_GOOGLE_SUB), as a users row's first sign-in pins
+	// any other user.
+	AdminGoogleSub string
+	HostedDomain   string
+	DevEmail       string
 }
 
 // SessionUser is the authenticated principal attached to a request.
@@ -80,6 +84,11 @@ type SessionUser struct {
 	Sub   string // Google account ID from the session
 	Epoch int    // session epoch from the session
 	Exp   int64  // session expiry (unix seconds)
+
+	// epochKnown is false for the bootstrap admin when its users row
+	// could not be read: it is the break-glass account and keeps
+	// working while the database does not.
+	epochKnown bool
 }
 
 // IsAdmin reports whether the user has the admin role.
@@ -163,8 +172,11 @@ func (a *Authenticator) lookup(ctx context.Context, email string) (*SessionUser,
 		return nil, false, nil
 	}
 
-	if a.cfg.AdminEmail != "" && email == a.cfg.AdminEmail {
-		return &SessionUser{Email: email, Role: "admin"}, true, nil
+	if a.isBootstrapAdmin(email) {
+		u := &SessionUser{Email: email, Role: "admin"}
+		u.Epoch, u.epochKnown = a.adminEpoch(ctx, email)
+
+		return u, true, nil
 	}
 
 	row, err := a.users.GetUser(ctx, email)
@@ -201,9 +213,14 @@ func (a *Authenticator) authorizeLogin(ctx context.Context, email, sub string) (
 
 	user.Sub = sub
 
-	// The bootstrap admin is pinned by the environment, not by a
-	// database row, so there is nothing to pin the sub to.
-	if a.cfg.AdminEmail != "" && user.Email == a.cfg.AdminEmail {
+	// The bootstrap admin comes from the environment: ADMIN_GOOGLE_SUB
+	// pins its Google account, and a users row (created when its
+	// sessions are first revoked) carries its session epoch.
+	if a.isBootstrapAdmin(user.Email) {
+		if a.cfg.AdminGoogleSub != "" && sub != a.cfg.AdminGoogleSub {
+			return nil, errForbidden
+		}
+
 		return user, nil
 	}
 
@@ -232,6 +249,10 @@ func (a *Authenticator) authorizeLogin(ctx context.Context, email, sub string) (
 			if err != nil {
 				return nil, err
 			}
+
+			if row == nil {
+				return nil, errForbidden // removed in the meantime
+			}
 		}
 	}
 
@@ -257,11 +278,22 @@ func (a *Authenticator) authorizeSession(ctx context.Context, p *sessionPayload)
 		return nil, errForbidden
 	}
 
-	user.Sub, user.Epoch, user.Exp = p.Sub, p.Epoch, p.Exp
+	if a.isBootstrapAdmin(user.Email) {
+		// A dev-bypass session carries no sub; it is loopback-only.
+		if a.cfg.AdminGoogleSub != "" && p.Sub != "" && p.Sub != a.cfg.AdminGoogleSub {
+			return nil, errForbidden
+		}
 
-	if a.cfg.AdminEmail != "" && user.Email == a.cfg.AdminEmail {
-		return user, nil // bootstrap admin: env is the revocation lever
+		if user.epochKnown && user.Epoch != p.Epoch {
+			return nil, errRelogin // revoked
+		}
+
+		user.Sub, user.Epoch, user.Exp = p.Sub, p.Epoch, p.Exp
+
+		return user, nil
 	}
+
+	user.Sub, user.Epoch, user.Exp = p.Sub, p.Epoch, p.Exp
 
 	row, err := a.users.GetUser(ctx, user.Email)
 	if err != nil {
@@ -283,6 +315,29 @@ func (a *Authenticator) authorizeSession(ctx context.Context, p *sessionPayload)
 	}
 
 	return user, nil
+}
+
+func (a *Authenticator) isBootstrapAdmin(email string) bool {
+	return a.cfg.AdminEmail != "" && email == a.cfg.AdminEmail
+}
+
+// adminEpoch is the bootstrap admin's session epoch: its users row's,
+// which exists only once its sessions have been revoked, else 0. known
+// is false when the row cannot be read; the admin is the break-glass
+// account, so it is not locked out by a broken database.
+func (a *Authenticator) adminEpoch(ctx context.Context, email string) (epoch int, known bool) {
+	row, err := a.users.GetUser(ctx, email)
+	if err != nil {
+		log.Printf("[auth] bootstrap admin epoch unreadable (%v); not checking it", err)
+
+		return 0, false
+	}
+
+	if row == nil {
+		return 0, true
+	}
+
+	return row.SessionEpoch, true
 }
 
 // --- OAuth handlers -------------------------------------------------------

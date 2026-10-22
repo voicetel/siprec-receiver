@@ -132,6 +132,7 @@ All configuration is environment variables (see also `.env.example`).
 | `GOOGLE_HOSTED_DOMAIN` | — | When set, sign-in requires a Google Workspace account from this domain (the `hd` claim) |
 | `SESSION_SECRET` | ephemeral | HMAC secret for session cookies (at least 32 bytes when set); set a stable random value in production or every restart signs everyone out |
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
+| `ADMIN_GOOGLE_SUB` | — | Pins the bootstrap administrator to one Google account ID (the `sub` claim), as a user's first sign-in pins any other user. Recommended unless `GOOGLE_HOSTED_DOMAIN` already restricts sign-in to your Workspace |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
 | `RETENTION_DAYS` | `0` (disabled) | Initial retention default. An administrator can override it under **Settings**; once saved there, the UI value wins and applies on the maintenance timer’s next run |
 | `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations). Must be `https://` (plain `http://` only to a loopback host): every fetch carries an API key |
@@ -442,9 +443,14 @@ Identity is pinned, not just allowlisted: a user's first sign-in
 records their Google account ID (`sub`), and later sign-ins must
 present the same one — an allowlisted email address, which anyone
 can register a Google account for, stops being sufficient on its
-own. With `GOOGLE_HOSTED_DOMAIN` set, sign-in additionally requires
-a Workspace account from that domain. **Revoke sessions** bumps a
-per-user epoch that invalidates every outstanding cookie at once.
+own. The bootstrap administrator has no row to pin to: set
+`ADMIN_GOOGLE_SUB` to pin it. With `GOOGLE_HOSTED_DOMAIN` set, sign-in
+additionally requires a Workspace account from that domain. **Revoke
+sessions** bumps a per-user epoch that invalidates every outstanding
+cookie at once (for the bootstrap administrator too; a removed and
+re-added user starts at a fresh random epoch). The bootstrap
+administrator is the break-glass account: if the database cannot be
+read, its sessions are not epoch-checked.
 Every administrative action (deletions, user and key changes,
 session revocations, record fetches, retention changes, and manual
 purges) is written to the **Audit log** (who, what, when) and shown

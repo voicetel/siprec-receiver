@@ -202,12 +202,45 @@ func TestCovAuthorizeLogin(t *testing.T) {
 		})
 	}
 
-	st := &covStore{}
+	st := &covStore{getUser: covRows(nil)}
 	a := covAuth(st, Config{AdminEmail: "boss@example.com"})
 
 	u, err := a.authorizeLogin(ctx, "Boss@example.com", "admin-sub")
-	if err != nil || u.Role != "admin" || u.Sub != "admin-sub" || st.calls != 0 {
-		t.Errorf("bootstrap admin = %+v, %v, store calls %d", u, err, st.calls)
+	if err != nil || u.Role != "admin" || u.Sub != "admin-sub" || u.Epoch != 0 || st.setCalls != 0 {
+		t.Errorf("bootstrap admin = %+v, %v, pins %d", u, err, st.setCalls)
+	}
+
+	// Once its sessions were revoked the admin's row carries its epoch.
+	a = covAuth(&covStore{getUser: covRows(&store.User{Role: "admin", SessionEpoch: 9})}, Config{AdminEmail: "boss@example.com"})
+	if u, err := a.authorizeLogin(ctx, "boss@example.com", "admin-sub"); err != nil || u.Epoch != 9 {
+		t.Errorf("revoked-before admin = %+v, %v; want epoch 9", u, err)
+	}
+
+	// The break-glass admin signs in even when its row cannot be read.
+	a = covAuth(&covStore{getUser: covRows(errCovStore)}, Config{AdminEmail: "boss@example.com"})
+	if u, err := a.authorizeLogin(ctx, "boss@example.com", "admin-sub"); err != nil || !u.IsAdmin() {
+		t.Errorf("admin with an unreadable row = %+v, %v", u, err)
+	}
+
+	// ADMIN_GOOGLE_SUB pins the bootstrap admin's Google account.
+	a = covAuth(&covStore{getUser: covRows(nil)}, Config{AdminEmail: "boss@example.com", AdminGoogleSub: "admin-sub"})
+	if _, err := a.authorizeLogin(ctx, "boss@example.com", "someone-else"); !errors.Is(err, errForbidden) {
+		t.Errorf("admin with another Google account = %v, want forbidden", err)
+	}
+
+	if u, err := a.authorizeLogin(ctx, "boss@example.com", "admin-sub"); err != nil || !u.IsAdmin() {
+		t.Errorf("admin with the pinned account = %+v, %v", u, err)
+	}
+}
+
+// A first sign-in that loses the pin race to a concurrent one re-reads
+// the row; a row removed in between is refused, not dereferenced.
+func TestCovAuthorizeLoginRowRemovedDuringPin(t *testing.T) {
+	st := &covStore{getUser: covRows(&store.User{Role: "user"}, &store.User{Role: "user"}, nil)}
+	a := covAuth(st, Config{})
+
+	if _, err := a.authorizeLogin(context.Background(), "u@example.com", "sub-1"); !errors.Is(err, errForbidden) {
+		t.Errorf("err = %v, want forbidden", err)
 	}
 }
 
@@ -250,12 +283,32 @@ func TestCovAuthorizeSession(t *testing.T) {
 		})
 	}
 
-	st := &covStore{}
-	a := covAuth(st, Config{AdminEmail: "boss@example.com"})
+	admin := func(st *covStore, sub string) *Authenticator {
+		return covAuth(st, Config{AdminEmail: "boss@example.com", AdminGoogleSub: sub})
+	}
 
-	u, err := a.authorizeSession(ctx, &sessionPayload{Email: "boss@example.com", Sub: "s", Epoch: 7, Exp: 11})
-	if err != nil || !u.IsAdmin() || u.Sub != "s" || u.Epoch != 7 || u.Exp != 11 || st.calls != 0 {
-		t.Errorf("bootstrap admin = %+v, %v, store calls %d", u, err, st.calls)
+	u, err := admin(&covStore{getUser: covRows(nil)}, "").authorizeSession(ctx,
+		&sessionPayload{Email: "boss@example.com", Sub: "s", Epoch: 0, Exp: 11})
+	if err != nil || !u.IsAdmin() || u.Sub != "s" || u.Exp != 11 {
+		t.Errorf("bootstrap admin = %+v, %v", u, err)
+	}
+
+	for name, tc := range map[string]struct {
+		st   *covStore
+		pin  string
+		p    sessionPayload
+		want error
+	}{
+		"revoked":          {&covStore{getUser: covRows(&store.User{Role: "admin", SessionEpoch: 8})}, "", sessionPayload{Email: "boss@example.com", Epoch: 7}, errRelogin},
+		"unreadable row":   {&covStore{getUser: covRows(errCovStore)}, "", sessionPayload{Email: "boss@example.com", Epoch: 3}, nil},
+		"another account":  {&covStore{getUser: covRows(nil)}, "pinned", sessionPayload{Email: "boss@example.com", Sub: "other"}, errForbidden},
+		"current epoch ok": {&covStore{getUser: covRows(&store.User{Role: "admin", SessionEpoch: 8})}, "pinned", sessionPayload{Email: "boss@example.com", Sub: "pinned", Epoch: 8}, nil},
+		"dev session":      {&covStore{getUser: covRows(nil)}, "pinned", sessionPayload{Email: "boss@example.com"}, nil},
+	} {
+		u, err := admin(tc.st, tc.pin).authorizeSession(ctx, &tc.p)
+		if !errors.Is(err, tc.want) || (tc.want == nil && !u.IsAdmin()) {
+			t.Errorf("%s: %+v, %v; want %v", name, u, err, tc.want)
+		}
 	}
 }
 

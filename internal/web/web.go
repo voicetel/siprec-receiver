@@ -687,6 +687,33 @@ func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
 
 	email := store.NormalizeEmail(r.FormValue("email"))
 
+	row, err := s.Store.GetUser(r.Context(), email)
+	if err != nil {
+		log.Printf("[web] revoke sessions %q: %v", email, err) // #nosec G706 -- quoted values
+		http.Error(w, "failed to revoke sessions", http.StatusInternalServerError)
+
+		return
+	}
+
+	switch {
+	case row == nil && email == s.Auth.AdminEmail():
+		// The bootstrap admin has no row until its sessions are first
+		// revoked; the row carries the epoch every admin cookie is
+		// checked against from then on.
+		if err := s.Store.UpsertUser(r.Context(), store.User{
+			Email: email, Role: "admin", CreatedBy: user.Email, CreatedAt: time.Now().UTC(),
+		}); err != nil {
+			log.Printf("[web] revoke sessions %q: %v", email, err) // #nosec G706 -- quoted values
+			http.Error(w, "failed to revoke sessions", http.StatusInternalServerError)
+
+			return
+		}
+	case row == nil:
+		http.Redirect(w, r, "/admin/users?msg=No+such+user", http.StatusSeeOther)
+
+		return
+	}
+
 	if err := s.Store.BumpSessionEpoch(r.Context(), email); err != nil {
 		log.Printf("[web] revoke sessions %q: %v", email, err) // #nosec G706 -- quoted values
 		http.Error(w, "failed to revoke sessions", http.StatusInternalServerError)
