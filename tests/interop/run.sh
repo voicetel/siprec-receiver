@@ -51,6 +51,17 @@ for _ in $(seq 1 30); do
     sleep 0.5
 done
 
+# VoiceML-shaped callbacks can arrive before the recording is finalized.
+curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/amd \
+    -H 'Authorization: Bearer interop-secret' \
+    --data 'CallSid=CA00112233445566778899aabbccddeeff&AccountSid=ACinterop&AnsweredBy=human&MachineDetectionDuration=1500'
+curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/disposition \
+    -H 'Authorization: Bearer interop-secret' \
+    --data 'CallSid=CA00112233445566778899aabbccddeeff&AccountSid=ACinterop&CallStatus=completed&CallDuration=2&SequenceNumber=3'
+curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/disposition \
+    -H 'Authorization: Bearer interop-secret' \
+    --data 'CallSid=CA00112233445566778899aabbccddeeff&CallStatus=ringing&SequenceNumber=2'
+
 echo "==> running FreeSWITCH + mod_siprec scenarios in container"
 $docker run --rm --network host --cap-add=SYS_NICE \
     -v "$here:/interop:ro" -v "$out:/tmp/interop" \

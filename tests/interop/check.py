@@ -6,7 +6,7 @@ mod_siprec calls (see interop.sh) and verifies, from the SRS side:
 
   main      one mixed leg, ~8 s of 440 Hz tone (4 s + 4 s; the 3 s
             pause is compressed out), then an AMD notification posted
-            against its SIP Call-ID merges onto the same row
+             against its derived VoiceML CallSid merges onto the same row
   stop      one leg of ~2 s (recording stopped mid-call)
   separate  two legs carrying different dominant tones (440 vs 1000 Hz)
 
@@ -64,8 +64,8 @@ def main():
 
     calls = db.execute(
         "SELECT * FROM calls ORDER BY started_at").fetchall()
-    check("three calls recorded", len(calls) == 3, f"(got {len(calls)})")
-    if len(calls) != 3:
+    check("four calls recorded", len(calls) == 4, f"(got {len(calls)})")
+    if len(calls) != 4:
         return 1
 
     legs = {}
@@ -78,11 +78,23 @@ def main():
         check(f"call {c['id']} completed", c["status"] == "completed",
               f"(status={c['status']!r})")
         check(f"call {c['id']} has fs_uuid",
-              bool(c["fs_uuid"]), f"(fs_uuid={c['fs_uuid']!r})")
+               bool(c["fs_uuid"]), f"(fs_uuid={c['fs_uuid']!r})")
+        check(f"call {c['id']} has derived VoiceML CallSid",
+              c["call_sid"] == "CA" + c["fs_uuid"].replace("-", ""))
         check(f"call {c['id']} legs have no write error",
               all(not l["write_error"] for l in legs[c["id"]]))
 
-    by_legs = sorted(calls, key=lambda c: len(legs[c["id"]]))
+    outbound_sid = "CA00112233445566778899aabbccddeeff"
+    outbound = next((c for c in calls if c["call_sid"] == outbound_sid), None)
+    check("outbound CallSid channel was recorded", outbound is not None)
+    if outbound is None:
+        return 1
+    check("pre-recording AMD adopted by CallSid only", outbound["amd_answered_by"] == "human")
+    check("late ringing did not erase terminal disposition",
+          outbound["disp_status"] == "completed" and outbound["disp_duration_sec"] == 2)
+    check("connector account alias was retained", outbound["account_sid"] == "ACinterop")
+    check("outbound CallSid recording has one leg", len(legs[outbound["id"]]) == 1)
+    by_legs = sorted([c for c in calls if c["call_sid"] != outbound_sid], key=lambda c: len(legs[c["id"]]))
     stop_call, main_call, sep_call = by_legs[0], by_legs[1], by_legs[2]
     # stop and main both have 1 leg; tell them apart by duration.
     one_leg = sorted([stop_call, main_call],
@@ -115,12 +127,11 @@ def main():
     check("separate legs carry different tones (440 vs 1000)",
           sorted(dom) == [440, 1000], f"(dominant per leg: {dom})")
 
-    # AMD notification merges onto the main call by SIP Call-ID.
+    # Ordinary VoiceML callbacks know CallSid, not the recording SIP Call-ID.
     form = urllib.parse.urlencode({
-        "CallSid": "CA0123456789abcdef0123456789abcdef",
+        "CallSid": main_call["call_sid"],
         "AnsweredBy": "human",
         "MachineDetectionDuration": "1500",
-        "SipCallId": main_call["sip_call_id"],
     }).encode()
     req = urllib.request.Request(
         http_base + "/api/notify/amd", data=form,

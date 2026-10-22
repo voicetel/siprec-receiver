@@ -90,6 +90,15 @@ cat > "${CONF}/dialplan/default/00_siprec_interop.xml" <<EOF
       <action application="hangup"/>
     </condition>
   </extension>
+  <extension name="siprec_live_callsid">
+    <condition field="destination_number" expression="^siprec_live_callsid\$">
+      <action application="answer"/>
+      <action application="sleep" data="500"/>
+      <action application="siprec" data="callsid sip:${IP}:5070;transport=udp;accountsid=ACinterop"/>
+      <action application="sleep" data="2000"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
 </include>
 EOF
 
@@ -129,6 +138,9 @@ run_call() {
 run_call main siprec_live_main
 run_call stop siprec_live_stop
 run_call separate siprec_live_sep
+echo "[interop] scenario: outbound CallSid channel"
+"$CLI" -x "originate {origination_uuid=CA00112233445566778899aabbccddeeff}sofia/internal/siprec_tone@${IP}:5080 siprec_live_callsid XML default"
+sleep 6
 
 "$CLI" -x "shutdown" >/dev/null 2>&1 || kill "$FSPID"
 wait "$FSPID" 2>/dev/null
