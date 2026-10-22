@@ -31,11 +31,17 @@ type Client struct {
 	HTTP    *http.Client
 }
 
-// New builds a Client with a bounded HTTP timeout.
+// New builds a Client with a bounded HTTP timeout. It follows no
+// redirects: the request carries the account's API key, and a redirect
+// (to another host, or from https to http) must not take it along. A
+// redirect answer surfaces as a StatusError.
 func New(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		HTTP:    &http.Client{Timeout: 15 * time.Second},
+		HTTP: &http.Client{
+			Timeout:       15 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 	}
 }
 

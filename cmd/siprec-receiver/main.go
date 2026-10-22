@@ -21,6 +21,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -204,12 +205,50 @@ func validateConfig(cfg *config) error {
 		return fmt.Errorf("SESSION_SECRET is %d bytes; at least 32 are required", len(cfg.SessionSecret))
 	}
 
+	if err := validVoiceMLBaseURL(cfg.VoiceMLBaseURL); err != nil {
+		return err
+	}
+
 	if cfg.DevAuthEmail != "" && !isLoopbackListen(cfg.HTTPListen) {
 		return fmt.Errorf("DEV_AUTH_EMAIL is set but HTTP_LISTEN (%s) is not loopback; "+
 			"the dev sign-in bypass must never be reachable from other hosts", cfg.HTTPListen)
 	}
 
 	return nil
+}
+
+// validVoiceMLBaseURL accepts an empty VOICEML_BASE_URL (fetches off),
+// an https URL, or plain http to a loopback host: every fetch carries an
+// account's API key as Basic auth, which must not cross a network in
+// the clear.
+func validVoiceMLBaseURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("VOICEML_BASE_URL %q is not an absolute URL", raw)
+	}
+
+	switch {
+	case u.Scheme == "https":
+		return nil
+	case u.Scheme == "http" && isLoopbackHost(u.Hostname()):
+		return nil
+	}
+
+	return fmt.Errorf("VOICEML_BASE_URL must use https (plain http only to a loopback host): %q", raw)
+}
+
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
 }
 
 // isLoopbackListen reports whether an HTTP listen address binds

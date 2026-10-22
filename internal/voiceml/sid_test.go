@@ -42,6 +42,35 @@ func TestFetchCall_RefusesNonSIDs(t *testing.T) {
 	}
 }
 
+// A redirect is not followed: it would carry the account's API key to
+// wherever it points (another host, or plain http).
+func TestFetchCall_DoesNotFollowRedirects(t *testing.T) {
+	var leaked atomic.Bool
+
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Store(true)
+		}
+	}))
+	t.Cleanup(elsewhere.Close)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, elsewhere.URL+"/steal", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	_, _, err := New(srv.URL).FetchCall(context.Background(), testAccount, "secret", testCall)
+
+	var se *StatusError
+	if !errors.As(err, &se) || se.Code != http.StatusFound {
+		t.Fatalf("err = %v, want StatusError 302", err)
+	}
+
+	if leaked.Load() {
+		t.Error("the API key followed the redirect")
+	}
+}
+
 func TestValidSid(t *testing.T) {
 	for s, want := range map[string]bool{
 		"CA0123456789abcdefABCDEF0123456789": true,

@@ -749,3 +749,30 @@ func TestRandomOffset(t *testing.T) {
 		t.Error("randomOffset returned the same value 64 times")
 	}
 }
+
+// Every fetch carries an account's API key as Basic auth: VOICEML_BASE_URL
+// must be https, or plain http only to a loopback host.
+func TestValidVoiceMLBaseURL(t *testing.T) {
+	for raw, ok := range map[string]bool{
+		"":                        true,
+		"https://voiceml.example": true,
+		"http://127.0.0.1:8080":   true,
+		"http://localhost:8080":   true,
+		"http://[::1]:8080":       true,
+		"http://voiceml.example":  false,
+		"ftp://voiceml.example":   false,
+		"voiceml.example":         false,
+		"https://":                false,
+		"http://%zz":              false,
+	} {
+		err := validVoiceMLBaseURL(raw)
+		if (err == nil) != ok {
+			t.Errorf("validVoiceMLBaseURL(%q) = %v, want ok=%v", raw, err, ok)
+		}
+	}
+
+	cfg := &config{RTPPortMin: 41000, RTPPortMax: 42000, VoiceMLBaseURL: "http://voiceml.example"}
+	if err := validateConfig(cfg); err == nil {
+		t.Error("validateConfig accepted a plain-http VOICEML_BASE_URL")
+	}
+}
