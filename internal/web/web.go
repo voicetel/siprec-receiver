@@ -264,7 +264,12 @@ type listData struct {
 	Disposition  string
 	AMDs         []string
 	Dispositions []string
-	FilterQuery  string
+	// PrevURL / NextURL are the pager links, filters included. They are
+	// built here: html/template escapes an interpolated query string
+	// again, which turned "&amd=human" into "%26amd%3dhuman" and dropped
+	// every filter from page 2 on.
+	PrevURL template.URL
+	NextURL template.URL
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -323,6 +328,12 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	pageURL := func(n int) template.URL {
+		filterValues.Set("page", strconv.Itoa(n))
+
+		return template.URL("/recordings?" + filterValues.Encode()) // #nosec G203 -- built from url.Values.Encode
+	}
+
 	s.render(w, "recordings.html", listData{
 		baseData:     s.base(r),
 		Calls:        calls,
@@ -338,7 +349,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		Disposition:  f.Disposition,
 		AMDs:         amdDispositions,
 		Dispositions: callDispositions,
-		FilterQuery:  filterValues.Encode(),
+		PrevURL:      pageURL(page - 1),
+		NextURL:      pageURL(page + 1),
 	})
 }
 

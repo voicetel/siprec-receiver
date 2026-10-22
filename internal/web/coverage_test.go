@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"html"
 	"io"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -327,10 +329,27 @@ func TestCov_ListFiltersAndPaging(t *testing.T) {
 	r = covGet(t, admin, e.srv.URL+"/recordings?"+q.Encode())
 	wantStatus(t, "filtered list", r, http.StatusOK)
 
-	// Page 2 of 1 renders a Prev link with the filters appended, and
-	// the search form echoes every filter back.
-	if !strings.Contains(r.body, `href="/recordings?page=1&`) {
-		t.Errorf("filtered page 2 has no Prev link carrying the filters")
+	// Page 2 of 1 renders a Prev link carrying every filter (they used to
+	// be escaped into one unusable "%26amd%3d..." parameter), and the
+	// search form echoes every filter back.
+	m := regexp.MustCompile(`<a href="([^"]+)">← Prev</a>`).FindStringSubmatch(r.body)
+	if m == nil {
+		t.Fatalf("filtered page 2 has no Prev link:\n%s", r.body)
+	}
+
+	prev, err := url.Parse(html.UnescapeString(m[1]))
+	if err != nil {
+		t.Fatalf("Prev link %q: %v", m[1], err)
+	}
+
+	got := prev.Query()
+	for key, want := range map[string]string{
+		"page": "1", "q": "dlg", "from_number": "1216", "to_number": "1208",
+		"start_date": "2020-01-01", "end_date": "2099-12-31", "amd": "human", "disposition": "completed",
+	} {
+		if got.Get(key) != want {
+			t.Errorf("Prev link %s = %q, want %q (link %q)", key, got.Get(key), want, prev)
+		}
 	}
 
 	for _, want := range []string{`value="dlg"`, `value="1216"`, `value="1208"`,

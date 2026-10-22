@@ -63,8 +63,8 @@
 </table>
 
 <div class="pager">
-  {{if gt .Page 1}}<a href="/recordings?page={{subtract .Page 1}}{{if .FilterQuery}}&{{.FilterQuery}}{{end}}">← Prev</a>{{end}}
+  {{if gt .Page 1}}<a href="{{.PrevURL}}">← Prev</a>{{end}}
   <span>Page {{.Page}} of {{.Pages}}</span>
-  {{if lt .Page .Pages}}<a href="/recordings?page={{add .Page 1}}{{if .FilterQuery}}&{{.FilterQuery}}{{end}}">Next →</a>{{end}}
+  {{if lt .Page .Pages}}<a href="{{.NextURL}}">Next →</a>{{end}}
 </div>
 {{template "footer" .}}
