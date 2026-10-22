@@ -117,3 +117,39 @@ func TestAuditLog(t *testing.T) {
 		t.Errorf("order = %q, %q", entries[0].Action, entries[1].Action)
 	}
 }
+
+// A user removed and added again starts at a fresh random epoch, so a
+// cookie revoked before the removal (or minted before it) stays dead.
+func TestUpsertUser_ReAddedUserGetsFreshEpoch(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	add := func() int {
+		t.Helper()
+
+		if err := s.UpsertUser(ctx, User{Email: "re@example.com", Role: "user", CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+
+		u, _ := s.GetUser(ctx, "re@example.com")
+
+		return u.SessionEpoch
+	}
+
+	first := add()
+	if first <= 0 {
+		t.Fatalf("new user epoch = %d, want a positive random value", first)
+	}
+
+	if again := add(); again != first {
+		t.Errorf("re-saving an existing user changed its epoch %d -> %d", first, again)
+	}
+
+	if _, err := s.DeleteUser(ctx, "re@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	if readded := add(); readded == first || readded == first+1 {
+		t.Errorf("re-added user epoch %d matches an old cookie's (%d)", readded, first)
+	}
+}

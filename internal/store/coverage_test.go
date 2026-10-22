@@ -832,13 +832,15 @@ func TestUsers_DisabledAbsentAndIdentity(t *testing.T) {
 		t.Fatalf("second pin = %v, %v; want refused", pinned, err)
 	}
 
+	before, _ := s.GetUser(ctx, "off@example.com")
+
 	if err := s.BumpSessionEpoch(ctx, "off@example.com"); err != nil {
 		t.Fatalf("BumpSessionEpoch: %v", err)
 	}
 
 	u, _ = s.GetUser(ctx, "off@example.com")
-	if u.GoogleSub != "sub-1" || u.SessionEpoch != 1 {
-		t.Errorf("identity = sub %q epoch %d, want sub-1 / 1", u.GoogleSub, u.SessionEpoch)
+	if u.GoogleSub != "sub-1" || u.SessionEpoch != before.SessionEpoch+1 {
+		t.Errorf("identity = sub %q epoch %d, want sub-1 / %d", u.GoogleSub, u.SessionEpoch, before.SessionEpoch+1)
 	}
 
 	if deleted, err := s.DeleteUser(ctx, "nobody@example.com"); deleted || err != nil {

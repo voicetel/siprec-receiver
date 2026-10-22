@@ -560,14 +560,16 @@ func TestCov_Users(t *testing.T) {
 		covPost(t, admin, u+"/admin/users/delete", url.Values{"email": {adminEmail}, "csrf_token": {csrf}}),
 		"cannot+be+removed")
 
+	before, _ := e.store.GetUser(context.Background(), "boss@example.com")
+
 	wantStatus(t, "revoke bad csrf", covPost(t, admin, u+"/admin/users/revoke", url.Values{"email": {"boss@example.com"}}),
 		http.StatusForbidden)
 	wantRedirect(t, "revoke",
 		covPost(t, admin, u+"/admin/users/revoke", url.Values{"email": {"boss@example.com"}, "csrf_token": {csrf}}),
 		"Sessions+revoked")
 
-	if got, _ := e.store.GetUser(context.Background(), "boss@example.com"); got.SessionEpoch != 1 {
-		t.Errorf("session epoch = %d, want 1", got.SessionEpoch)
+	if got, _ := e.store.GetUser(context.Background(), "boss@example.com"); got.SessionEpoch != before.SessionEpoch+1 {
+		t.Errorf("session epoch = %d, want %d", got.SessionEpoch, before.SessionEpoch+1)
 	}
 
 	// A broken audit trail never blocks the action it describes.

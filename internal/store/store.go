@@ -19,7 +19,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -909,6 +911,9 @@ func NormalizeEmail(email string) string {
 }
 
 // UpsertUser adds a user or updates an existing user's role/disabled.
+// A new row starts at a random session epoch: a user who is removed and
+// added again must not match the epoch a cookie from before carries
+// (with a fixed starting value, a revoked cookie came back to life).
 func (s *Store) UpsertUser(ctx context.Context, u User) error {
 	role := u.Role
 	if role != "admin" {
@@ -917,9 +922,9 @@ func (s *Store) UpsertUser(ctx context.Context, u User) error {
 
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO users (email, role, created_by, created_at, disabled, google_sub, session_epoch)
-VALUES (?, ?, ?, ?, ?, '', 0)
+VALUES (?, ?, ?, ?, ?, '', ?)
 ON CONFLICT(email) DO UPDATE SET role = excluded.role, disabled = excluded.disabled;`,
-		NormalizeEmail(u.Email), role, u.CreatedBy, millis(u.CreatedAt), boolInt(u.Disabled))
+		NormalizeEmail(u.Email), role, u.CreatedBy, millis(u.CreatedAt), boolInt(u.Disabled), randomEpoch())
 	if err != nil {
 		return fmt.Errorf("store: upsert user: %w", err)
 	}
@@ -997,6 +1002,15 @@ func (s *Store) DeleteUser(ctx context.Context, email string) (bool, error) {
 	n, err := res.RowsAffected()
 
 	return n > 0, err
+}
+
+// randomEpoch is a random session epoch in [1, 2^31) from crypto/rand,
+// whose Read never returns an error.
+func randomEpoch() int {
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+
+	return int(binary.BigEndian.Uint32(b[:])>>1) | 1
 }
 
 func boolInt(b bool) int {
