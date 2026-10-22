@@ -54,6 +54,7 @@ endpoint, and the web UI are new in this repository.
 | Pause / resume re-INVITE | [RFC 7866 §6.4][rfc7866-6.4] | ✅ `a=inactive` / `a=sendonly` re-INVITEs re-answer on the same ports and keep writing the same files — a pause never splits the recording |
 | BYE teardown | [RFC 7866 §6.4][rfc7866-6.4] | ✅ Closes WAVs, releases RTP ports, finalizes the call row |
 | Re-INVITE replacing media shape | [RFC 7866 §6.4][rfc7866-6.4] | ✅ Prior session is finalized, a fresh one is recorded |
+| UPDATE / session timers | [RFC 3311](https://datatracker.ietf.org/doc/html/rfc3311) / [RFC 4028](https://datatracker.ietf.org/doc/html/rfc4028) / [RFC 7866 §9.2][rfc7866-9.2] | ✅ UPDATE refreshes, pauses/resumes (same media shape) and carries RS-Metadata; `Session-Expires` is echoed with the SRC as refresher (422 below 90 s); an SDP-less re-INVITE is re-offered the current SDP |
 | `<recording>` / `<datamode>` / `<group>` / `<session>` | [RFC 7865 App. A][rfc7865] | ✅ Parsed, persisted (raw XML + normalized JSON) |
 | `<participant>` AORs (`<nameID aor>`) | [RFC 7865 App. A][rfc7865] | ✅ Caller/callee numbers derived from participants; used as leg labels |
 | Metadata IDs (`session_id` = parent call UUID, base64) | [RFC 7865 §6.9][rfc7865] | ✅ Decoded back to the FreeSWITCH call UUID and stored for correlation |
@@ -65,6 +66,7 @@ endpoint, and the web UI are new in this repository.
 | IPv6 | [RFC 4566 §5.7][rfc4566] | ❌ SDP answers advertise IPv4 (`c=IN IP4`); run the SRS on IPv4 |
 
 [rfc7866-6.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.1
+[rfc7866-9.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-9.2
 [rfc7866-6.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.2
 [rfc7866-6.4]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.4
 [rfc7866-7]: https://datatracker.ietf.org/doc/html/rfc7866#section-7

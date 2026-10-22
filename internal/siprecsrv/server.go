@@ -29,6 +29,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -233,6 +234,7 @@ type session struct {
 	answerVer   int
 	offer       *ParsedSDP  // all offered m-lines, including declined streams
 	peer        *dialogPeer // how to BYE the SRC; nil when the INVITE gave no Contact
+	lastAnswer  string      // the SDP last answered, re-offered to an SDP-less re-INVITE
 
 	lastActivity atomic.Int64 // unix nano: last SIP message or RTP frame
 }
@@ -390,6 +392,7 @@ func (s *Server) registerHandlers(srv *sipgo.Server) {
 	srv.OnAck(s.onAck)
 	srv.OnBye(s.onBye)
 	srv.OnOptions(s.onOptions)
+	srv.OnUpdate(s.onUpdate)
 }
 
 // Serve binds a SIP listener on addr (e.g. "127.0.0.1:5070") and
@@ -832,8 +835,14 @@ func (s *Server) respond(req *sip.Request, tx sip.ServerTransaction, code int, r
 	s.respondWithTag(req, tx, code, reason, body, contentType, "")
 }
 
-func (s *Server) respondWithTag(req *sip.Request, tx sip.ServerTransaction, code int, reason string, body []byte, contentType, tag string) {
+func (s *Server) respondWithTag(req *sip.Request, tx sip.ServerTransaction, code int, reason string,
+	body []byte, contentType, tag string, extra ...sip.Header,
+) {
 	resp := sip.NewResponseFromRequest(req, code, reason, body)
+	for _, h := range extra {
+		resp.AppendHeader(h)
+	}
+
 	if tag != "" {
 		resp.To().Params.Add("tag", tag)
 	}
@@ -850,7 +859,8 @@ func (s *Server) respondWithTag(req *sip.Request, tx sip.ServerTransaction, code
 
 func (s *Server) onOptions(req *sip.Request, tx sip.ServerTransaction) {
 	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
-	resp.AppendHeader(sip.NewHeader("Allow", "INVITE, ACK, BYE, OPTIONS"))
+	resp.AppendHeader(sip.NewHeader("Allow", allowedMethods))
+	resp.AppendHeader(sip.NewHeader("Supported", "timer"))
 	_ = tx.Respond(resp)
 }
 
@@ -967,6 +977,17 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if srcIP := srcIPOf(req); !sh.allowedSource(srcIP) {
 		log.Printf("[siprecsrv] INVITE call-id=%q rejected: source %q not in allowlist", callID, srcIP)
 		s.respond(req, tx, sip.StatusForbidden, "Forbidden", nil, "")
+
+		return
+	}
+
+	timer, ok := s.checkSessionTimer(req, tx)
+	if !ok {
+		return
+	}
+
+	if len(req.Body()) == 0 && toTagOf(req) != "" {
+		s.reofferAnswer(req, tx, callID, timer)
 
 		return
 	}
@@ -1093,13 +1114,14 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 			existing.metadataXML = metadata
 		}
 
+		existing.lastAnswer = answer
 		existing.touch()
 		paused, tag := existing.paused, existing.toTag
 		sh.mu.Unlock()
 
 		log.Printf("[siprecsrv] re-INVITE call-id=%q paused=%v — recording continues on %d leg(s)",
 			callID, paused, len(existing.legs))
-		s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", tag)
+		s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", tag, timer...)
 
 		return
 	}
@@ -1264,9 +1286,220 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	sess.pending = false
 	sess.answerVer++
+	sess.lastAnswer = answer
 	sh.mu.Unlock()
 
-	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", sess.toTag)
+	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", sess.toTag, timer...)
+}
+
+// allowedMethods is what this SRS answers (OPTIONS Allow).
+const allowedMethods = "INVITE, ACK, BYE, OPTIONS, UPDATE"
+
+// minSessionExpires is the smallest session interval accepted (RFC
+// 4028 §5: 90 s is the floor every implementation must accept).
+const minSessionExpires = 90
+
+// checkSessionTimer applies RFC 4028 to an INVITE or UPDATE that asks
+// for session timers. It returns the headers a 2xx must carry (the
+// interval echoed with this SRS's choice of the SRC as refresher, and
+// Require: timer when the SRC supports it), or answers 422 itself and
+// reports false when the interval is below minSessionExpires. The SRS
+// never refreshes; any refresh from the SRC just counts as activity.
+func (s *Server) checkSessionTimer(req *sip.Request, tx sip.ServerTransaction) ([]sip.Header, bool) {
+	h := req.GetHeader("Session-Expires")
+	if h == nil {
+		return nil, true
+	}
+
+	value := strings.TrimSpace(h.Value())
+	if i := strings.IndexByte(value, ';'); i >= 0 {
+		value = value[:i]
+	}
+
+	secs, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || secs <= 0 {
+		s.respond(req, tx, sip.StatusBadRequest, "bad Session-Expires", nil, "")
+
+		return nil, false
+	}
+
+	if secs < minSessionExpires {
+		s.respondWithTag(req, tx, 422, "Session Interval Too Small", nil, "", "",
+			sip.NewHeader("Min-SE", strconv.Itoa(minSessionExpires)))
+
+		return nil, false
+	}
+
+	hdrs := []sip.Header{sip.NewHeader("Session-Expires", strconv.Itoa(secs)+";refresher=uac")}
+	if supportsTimer(req) {
+		hdrs = append(hdrs, sip.NewHeader("Require", "timer"))
+	}
+
+	return hdrs, true
+}
+
+// supportsTimer reports whether the request lists the timer extension in
+// Supported or Require.
+func supportsTimer(req *sip.Request) bool {
+	for _, name := range []string{"Supported", "Require"} {
+		for _, h := range req.GetHeaders(name) {
+			for _, tag := range strings.Split(h.Value(), ",") {
+				if strings.EqualFold(strings.TrimSpace(tag), "timer") {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+// inDialog looks up the dialog an in-dialog request names, answering it
+// itself (481, or 500 for a CSeq at or below the last one) and
+// returning nil when it does not belong. Called with sh.mu held; on nil
+// the lock has been released.
+func (s *Server) inDialog(req *sip.Request, tx sip.ServerTransaction, callID string) *session {
+	sh := s.shared
+
+	sess, ok := sh.sessions[callID]
+	if !ok || sess.dialogMismatch(req) {
+		sh.mu.Unlock()
+		log.Printf("[siprecsrv] %s call-id=%q rejected: no such dialog", req.Method, callID)
+		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
+
+		return nil
+	}
+
+	if sess.staleCSeq(req) {
+		sh.mu.Unlock()
+		s.respond(req, tx, sip.StatusInternalServerError, "CSeq out of order", nil, "")
+
+		return nil
+	}
+
+	if sess.pending {
+		sh.mu.Unlock()
+		s.respond(req, tx, sip.StatusRequestPending, "Request Pending", nil, "")
+
+		return nil
+	}
+
+	if seq := req.CSeq(); seq != nil {
+		sess.remoteCSeq = seq.SeqNo
+	}
+
+	sess.touch()
+
+	return sess
+}
+
+// reofferAnswer answers a re-INVITE without SDP (RFC 3261 §14.2: the
+// 2xx then carries the offer). A session refresh by re-INVITE often
+// looks like this; the SRS re-offers its current SDP unchanged and
+// ignores the answer in the ACK, so the recording carries on.
+func (s *Server) reofferAnswer(req *sip.Request, tx sip.ServerTransaction, callID string, timer []sip.Header) {
+	sh := s.shared
+
+	sh.mu.Lock()
+
+	sess := s.inDialog(req, tx, callID)
+	if sess == nil {
+		return
+	}
+
+	offer, tag := sess.lastAnswer, sess.toTag
+	sh.mu.Unlock()
+
+	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(offer), "application/sdp", tag, timer...)
+}
+
+// onUpdate handles UPDATE (RFC 3311) within a recording dialog: a
+// session-timer refresh with no body, an SDP offer that keeps the
+// media shape (pause/resume), and RS-Metadata, which RFC 7866 §9.2 lets
+// the SRC send in UPDATE. A media-shape change needs a re-INVITE.
+func (s *Server) onUpdate(req *sip.Request, tx sip.ServerTransaction) {
+	if !s.shared.beginWork() {
+		s.respond(req, tx, sip.StatusServiceUnavailable, "shutting down", nil, "")
+		return
+	}
+	defer s.shared.work.Done()
+
+	callID, valid := requestCallID(req)
+	if !valid {
+		s.respond(req, tx, sip.StatusBadRequest, "invalid Call-ID", nil, "")
+
+		return
+	}
+
+	timer, ok := s.checkSessionTimer(req, tx)
+	if !ok {
+		return
+	}
+
+	sdp, metadata, _, err := splitBody(req)
+	if err != nil {
+		log.Printf("[siprecsrv] UPDATE %q: parse body: %v", callID, err)
+		s.respond(req, tx, sip.StatusBadRequest, "bad body", nil, "")
+
+		return
+	}
+
+	var parsed *ParsedSDP
+	if sdp != "" {
+		if parsed, err = ParseSDP(sdp); err != nil {
+			s.respond(req, tx, sip.StatusBadRequest, "bad SDP", nil, "")
+
+			return
+		}
+	}
+
+	rec, metaErr := ParseMetadata(metadata)
+
+	sh := s.shared
+	sh.mu.Lock()
+
+	sess := s.inDialog(req, tx, callID)
+	if sess == nil {
+		return
+	}
+
+	var answer string
+
+	if parsed != nil {
+		if !reusableMedia(sess, parsed) {
+			sh.mu.Unlock()
+			s.respond(req, tx, sip.StatusNotAcceptableHere, "media change needs a re-INVITE", nil, "")
+
+			return
+		}
+
+		var aerr error
+
+		sess.answerVer++
+		if answer, aerr = BuildAnswerSDPWithVersion(sh.localIP, parsed, sess.answerPorts(), sess.answerVer); aerr != nil {
+			sh.mu.Unlock()
+			s.respond(req, tx, sip.StatusInternalServerError, "sdp build failed", nil, "")
+
+			return
+		}
+
+		sess.paused, sess.offer, sess.lastAnswer = parsed.AllInactive(), parsed, answer
+	}
+
+	if metadata != "" && metaErr == nil {
+		sess.metadata, sess.metadataXML = rec, metadata
+	}
+
+	tag := sess.toTag
+	sh.mu.Unlock()
+
+	if answer == "" {
+		s.respondWithTag(req, tx, sip.StatusOK, "OK", nil, "", tag, timer...)
+
+		return
+	}
+
+	s.respondWithTag(req, tx, sip.StatusOK, "OK", []byte(answer), "application/sdp", tag, timer...)
 }
 
 // openReceiver binds an RTP receiver on port and refuses the port if a
@@ -1393,26 +1626,43 @@ func resolveLegLabel(rec *Recording, m MediaDescription, idx int) string {
 // treat the whole body as SDP. A malformed multipart body is an error,
 // never a silently truncated parse.
 func extractSDPAndMetadata(req *sip.Request) (sdp string, metadata string, err error) {
+	sdp, metadata, multi, err := splitBody(req)
+	if err == nil && multi && sdp == "" {
+		return "", metadata, fmt.Errorf("multipart body has no application/sdp part")
+	}
+
+	return sdp, metadata, err
+}
+
+// splitBody returns a request's SDP and RS-Metadata, either of which may
+// be absent, and whether the body was multipart: a multipart body by
+// part type, a single body by its Content-Type (anything but
+// RS-Metadata, including no Content-Type, counts as SDP).
+func splitBody(req *sip.Request) (sdp, metadata string, multi bool, err error) {
 	body := req.Body()
 
 	ct := req.GetHeader("Content-Type")
 	if ct == nil {
-		return string(body), "", nil
+		return string(body), "", false, nil
 	}
 
 	mediaType, params, perr := mime.ParseMediaType(ct.Value())
 	if perr != nil {
 		// Tolerate header parse failure — assume plain SDP.
-		return string(body), "", nil
+		return string(body), "", false, nil
+	}
+
+	if strings.HasPrefix(mediaType, "application/rs-metadata") {
+		return "", string(body), false, nil
 	}
 
 	if !strings.HasPrefix(mediaType, "multipart/") {
-		return string(body), "", nil
+		return string(body), "", false, nil
 	}
 
 	boundary := params["boundary"]
 	if boundary == "" {
-		return "", "", fmt.Errorf("multipart body missing boundary")
+		return "", "", true, fmt.Errorf("multipart body missing boundary")
 	}
 
 	mr := multipart.NewReader(strings.NewReader(string(body)), boundary)
@@ -1424,12 +1674,12 @@ func extractSDPAndMetadata(req *sip.Request) (sdp string, metadata string, err e
 		}
 
 		if perr != nil {
-			return "", "", fmt.Errorf("multipart read: %w", perr)
+			return "", "", true, fmt.Errorf("multipart read: %w", perr)
 		}
 
 		buf, rerr := io.ReadAll(part)
 		if rerr != nil {
-			return "", "", fmt.Errorf("multipart part read: %w", rerr)
+			return "", "", true, fmt.Errorf("multipart part read: %w", rerr)
 		}
 
 		switch partType := part.Header.Get("Content-Type"); {
@@ -1440,11 +1690,7 @@ func extractSDPAndMetadata(req *sip.Request) (sdp string, metadata string, err e
 		}
 	}
 
-	if sdp == "" {
-		return "", metadata, fmt.Errorf("multipart body has no application/sdp part")
-	}
-
-	return sdp, metadata, nil
+	return sdp, metadata, true, nil
 }
 
 // callIDOf extracts the trimmed SIP Call-ID, or "" when the header
