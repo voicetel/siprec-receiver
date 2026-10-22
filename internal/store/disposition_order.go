@@ -18,7 +18,15 @@ func staleDisposition(status string, seq sql.NullInt64, at int64, n DispositionN
 		return *n.SequenceNumber <= seq.Int64
 	}
 	if at != 0 && !n.Timestamp.IsZero() {
-		return millis(n.Timestamp) <= at
+		// Timestamps have one-second precision, so a ringing and a busy
+		// event can share one: on a tie a terminal outcome still beats a
+		// nonterminal one.
+		ts := millis(n.Timestamp)
+		if ts == at {
+			return !terminalDisposition(n.CallStatus) || terminalDisposition(status)
+		}
+
+		return ts < at
 	}
 	// Without comparable ordering, retain an established terminal outcome.
 	return terminalDisposition(status)

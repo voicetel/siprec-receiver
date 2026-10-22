@@ -38,3 +38,39 @@ func TestDispositionOrdering(t *testing.T) {
 		})
 	}
 }
+
+// Timestamps have one-second precision: a terminal event sharing its
+// second with the ringing event before it must still land, and a
+// nonterminal one sharing a terminal event's second must not replace it.
+func TestDispositionTimestampTie(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	at := time.Unix(1_800_000_000, 0)
+
+	apply := func(status string) *Call {
+		t.Helper()
+
+		id, _, err := s.ApplyDisposition(ctx, DispositionNotification{CallSid: "CAtie", CallStatus: status, Timestamp: at})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		c, _ := s.GetCall(ctx, id)
+
+		return c
+	}
+
+	apply("ringing")
+
+	if c := apply("busy"); c.DispStatus != "busy" {
+		t.Fatalf("busy in the ringing event's second = %q, want busy", c.DispStatus)
+	}
+
+	if c := apply("ringing"); c.DispStatus != "busy" {
+		t.Errorf("ringing in the busy event's second replaced it: %q", c.DispStatus)
+	}
+
+	if c := apply("completed"); c.DispStatus != "busy" {
+		t.Errorf("a second terminal event in the same second replaced the first: %q", c.DispStatus)
+	}
+}
