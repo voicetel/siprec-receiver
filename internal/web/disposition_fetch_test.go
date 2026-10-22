@@ -21,7 +21,7 @@ func seedCallWithIDs(t *testing.T, f *fixture) int64 {
 
 	err := f.store.RecordLeg(context.Background(), siprecsrv.FinalizedLeg{
 		CallID: "dlg-disp", CallSid: "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		AccountSid: "ACtest", Label: "12165285911",
+		AccountSid: "AC00000000000000000000000000000001", Label: "12165285911",
 		WAVPath: "/rec/disp.wav", DurationSec: 55,
 		StartedAt: time.Now().UTC(),
 	})
@@ -105,13 +105,13 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 	// Fake VoiceML: serves one Call record, checks Basic auth.
 	cb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != "ACtest" || pass != "key123" {
+		if !ok || user != "AC00000000000000000000000000000001" || pass != "key123" {
 			w.WriteHeader(http.StatusUnauthorized)
 
 			return
 		}
 
-		if r.URL.Path != "/2010-04-01/Accounts/ACtest/Calls/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" {
+		if r.URL.Path != "/2010-04-01/Accounts/AC00000000000000000000000000000001/Calls/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json" {
 			w.WriteHeader(http.StatusNotFound)
 
 			return
@@ -119,7 +119,7 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"sid":"CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",` +
-			`"account_sid":"ACtest","from":"+12165285911","to":"+12085179911",` +
+			`"account_sid":"AC00000000000000000000000000000001","from":"+12165285911","to":"+12085179911",` +
 			`"status":"completed","direction":"outbound-api",` +
 			`"answered_by":"human","duration":"62"}`))
 	}))
@@ -159,7 +159,7 @@ func TestFetchRecord_EndToEnd(t *testing.T) {
 
 	// Admin stores the account key.
 	resp2 := post("/admin/integrations", url.Values{
-		"account_sid": {"ACtest"},
+		"account_sid": {"AC00000000000000000000000000000001"},
 		"api_key":     {"key123"},
 		"csrf_token":  {csrfFromPage(t, admin, f.srv.URL+"/admin/integrations")},
 	})

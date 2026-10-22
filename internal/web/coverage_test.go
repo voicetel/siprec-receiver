@@ -471,14 +471,14 @@ func TestCov_Delete(t *testing.T) {
 
 func TestCov_FetchRecordBranches(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "CAbroken") {
+		if strings.Contains(r.URL.Path, "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") {
 			http.Error(w, "boom", http.StatusInternalServerError)
 
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"sid":"CAgood","account_sid":"ACok","status":"completed"}`))
+		_, _ = w.Write([]byte(`{"sid":"CA99999999999999999999999999999999","account_sid":"ACcccccccccccccccccccccccccccccccc","status":"completed"}`))
 	}))
 	defer upstream.Close()
 
@@ -495,14 +495,14 @@ func TestCov_FetchRecordBranches(t *testing.T) {
 		CallID: "dlg-noacct", CallSid: "CAnoacct", Label: "a", WAVPath: "/x/b.wav",
 	})
 	broken := recordLeg(t, e.store, siprecsrv.FinalizedLeg{
-		CallID: "dlg-broken", CallSid: "CAbroken", AccountSid: "ACok", Label: "a", WAVPath: "/x/c.wav",
+		CallID: "dlg-broken", CallSid: "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", AccountSid: "ACcccccccccccccccccccccccccccccccc", Label: "a", WAVPath: "/x/c.wav",
 	})
 	good := recordLeg(t, e.store, siprecsrv.FinalizedLeg{
-		CallID: "dlg-good", CallSid: "CAgood", AccountSid: "ACok", Label: "a", WAVPath: "/x/d.wav",
+		CallID: "dlg-good", CallSid: "CA99999999999999999999999999999999", AccountSid: "ACcccccccccccccccccccccccccccccccc", Label: "a", WAVPath: "/x/d.wav",
 	})
 
 	if err := e.store.UpsertVoiceMLAccount(context.Background(),
-		store.VoiceMLAccount{AccountSid: "ACok", APIKey: "k", CreatedBy: adminEmail}); err != nil {
+		store.VoiceMLAccount{AccountSid: "ACcccccccccccccccccccccccccccccccc", APIKey: "k", CreatedBy: adminEmail}); err != nil {
 		t.Fatalf("UpsertVoiceMLAccount: %v", err)
 	}
 

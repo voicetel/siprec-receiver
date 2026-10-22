@@ -19,7 +19,7 @@ func TestFetchCall_TwilioShape(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"sid": "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			"account_sid": "ACtest",
+			"account_sid": "AC00000000000000000000000000000001",
 			"from": "+12165285911", "to": "+12085179911",
 			"status": "completed", "direction": "outbound-api",
 			"answered_by": "machine_end_beep", "duration": "62",
@@ -29,17 +29,17 @@ func TestFetchCall_TwilioShape(t *testing.T) {
 	defer srv.Close()
 
 	rec, pretty, err := New(srv.URL).FetchCall(context.Background(),
-		"ACtest", "key123", "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		"AC00000000000000000000000000000001", "key123", "CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	if err != nil {
 		t.Fatalf("FetchCall: %v", err)
 	}
 
-	wantPath := "/2010-04-01/Accounts/ACtest/Calls/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+	wantPath := "/2010-04-01/Accounts/AC00000000000000000000000000000001/Calls/CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
 	if gotPath != wantPath {
 		t.Errorf("path = %q, want %q", gotPath, wantPath)
 	}
 
-	if gotUser != "ACtest" || gotPass != "key123" {
+	if gotUser != "AC00000000000000000000000000000001" || gotPass != "key123" {
 		t.Errorf("basic auth = %q/%q", gotUser, gotPass)
 	}
 
@@ -60,17 +60,17 @@ func TestFetchCall_StatusErrorAndNotConfigured(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, _, err := New(srv.URL).FetchCall(context.Background(), "ACtest", "k", "CAx")
+	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	var stErr *StatusError
 	if !errors.As(err, &stErr) || stErr.Code != 404 {
 		t.Fatalf("err = %v, want StatusError 404", err)
 	}
 
-	if strings.Contains(err.Error(), "ACtest") {
+	if strings.Contains(err.Error(), "AC00000000000000000000000000000001") {
 		t.Errorf("error leaks account sid: %v", err)
 	}
 
-	if _, _, err := New("").FetchCall(context.Background(), "ACtest", "k", "CAx"); !errors.Is(err, ErrNotConfigured) {
+	if _, _, err := New("").FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002"); !errors.Is(err, ErrNotConfigured) {
 		t.Errorf("empty base URL err = %v, want ErrNotConfigured", err)
 	}
 }

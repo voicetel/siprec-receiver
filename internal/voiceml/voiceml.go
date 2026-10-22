@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,27 @@ func New(baseURL string) *Client {
 
 // ErrNotConfigured reports a missing base URL or credential.
 var ErrNotConfigured = errors.New("VoiceML fetch is not configured")
+
+// ErrBadSid reports an AccountSid or CallSid that is not a VoiceML SID.
+// Both reach the request path, and they come from notify payloads and
+// SIP URI parameters, so anything but "AC"/"CA" + 32 hex is refused
+// before a request (carrying the account's key) is made.
+var ErrBadSid = errors.New("not a VoiceML SID")
+
+// validSid reports whether s is prefix + 32 hex digits.
+func validSid(prefix, s string) bool {
+	if len(s) != len(prefix)+32 || !strings.HasPrefix(s, prefix) {
+		return false
+	}
+
+	for _, c := range s[len(prefix):] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+			return false
+		}
+	}
+
+	return true
+}
 
 // StatusError is a non-200 from VoiceML. The body is
 // deliberately not carried: VoiceML error text can echo the
@@ -73,10 +95,18 @@ func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid stri
 		return store.VoiceMLRecord{}, "", ErrNotConfigured
 	}
 
-	url := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls/%s.json",
-		c.BaseURL, accountSid, callSid)
+	if !validSid("AC", accountSid) {
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: AccountSid %q: %w", accountSid, ErrBadSid)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if !validSid("CA", callSid) {
+		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: CallSid %q: %w", callSid, ErrBadSid)
+	}
+
+	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls/%s.json",
+		c.BaseURL, url.PathEscape(accountSid), url.PathEscape(callSid))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return store.VoiceMLRecord{}, "", fmt.Errorf("voiceml: build request: %w", err)
 	}

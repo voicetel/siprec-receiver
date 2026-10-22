@@ -39,9 +39,9 @@ func TestFetchCall_MissingArgs(t *testing.T) {
 	ctx := context.Background()
 
 	cases := [][3]string{
-		{"", "k", "CA"},
-		{"AC", "", "CA"},
-		{"AC", "k", ""},
+		{"", "k", "CA00000000000000000000000000000002"},
+		{"AC00000000000000000000000000000001", "", "CA00000000000000000000000000000002"},
+		{"AC00000000000000000000000000000001", "k", ""},
 	}
 
 	for _, a := range cases {
@@ -54,7 +54,7 @@ func TestFetchCall_MissingArgs(t *testing.T) {
 func TestFetchCall_BadBaseURL(t *testing.T) {
 	c := New("http://bad host\x7f")
 
-	_, _, err := c.FetchCall(context.Background(), "AC", "k", "CA")
+	_, _, err := c.FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	if err == nil || !strings.Contains(err.Error(), "build request") {
 		t.Fatalf("err = %v, want build request error", err)
 	}
@@ -65,8 +65,8 @@ func TestFetchCall_TransportError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	_, _, err := New(url).FetchCall(context.Background(), "AC", "secretkey", "CAdead")
-	if err == nil || !strings.Contains(err.Error(), "fetch call CAdead") {
+	_, _, err := New(url).FetchCall(context.Background(), "AC00000000000000000000000000000001", "secretkey", "CA00000000000000000000000000000002")
+	if err == nil || !strings.Contains(err.Error(), "fetch call CA00000000000000000000000000000002") {
 		t.Fatalf("err = %v, want fetch error", err)
 	}
 
@@ -100,7 +100,7 @@ func TestFetchCall_TruncatedBody(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC", "k", "CA")
+	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	if err == nil || !strings.Contains(err.Error(), "read response") {
 		t.Fatalf("err = %v, want read response error", err)
 	}
@@ -109,7 +109,7 @@ func TestFetchCall_TruncatedBody(t *testing.T) {
 func TestFetchCall_InvalidJSON(t *testing.T) {
 	srv := jsonServer(t, `not json`)
 
-	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC", "k", "CA")
+	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	if err == nil || !strings.Contains(err.Error(), "decode response") {
 		t.Fatalf("err = %v, want decode response error", err)
 	}
@@ -118,7 +118,7 @@ func TestFetchCall_InvalidJSON(t *testing.T) {
 func TestFetchCall_WrongFieldType(t *testing.T) {
 	srv := jsonServer(t, `{"sid": 42}`)
 
-	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC", "k", "CA")
+	_, _, err := New(srv.URL).FetchCall(context.Background(), "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	if err == nil || !strings.Contains(err.Error(), "decode call") {
 		t.Fatalf("err = %v, want decode call error", err)
 	}
@@ -127,12 +127,12 @@ func TestFetchCall_WrongFieldType(t *testing.T) {
 func TestFetchCall_FillsMissingIdentifiers(t *testing.T) {
 	srv := jsonServer(t, `{"status":"busy","duration":null}`)
 
-	rec, pretty, err := New(srv.URL).FetchCall(context.Background(), "ACfallback", "k", "CAfallback")
+	rec, pretty, err := New(srv.URL).FetchCall(context.Background(), "ACffffffffffffffffffffffffffffffff", "k", "CAffffffffffffffffffffffffffffffff")
 	if err != nil {
 		t.Fatalf("FetchCall: %v", err)
 	}
 
-	if rec.Sid != "CAfallback" || rec.AccountSid != "ACfallback" || rec.Status != "busy" || rec.DurationSec != 0 {
+	if rec.Sid != "CAffffffffffffffffffffffffffffffff" || rec.AccountSid != "ACffffffffffffffffffffffffffffffff" || rec.Status != "busy" || rec.DurationSec != 0 {
 		t.Errorf("record = %+v", rec)
 	}
 
@@ -147,7 +147,7 @@ func TestFetchCall_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := New(srv.URL).FetchCall(ctx, "AC", "k", "CA")
+	_, _, err := New(srv.URL).FetchCall(ctx, "AC00000000000000000000000000000001", "k", "CA00000000000000000000000000000002")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}

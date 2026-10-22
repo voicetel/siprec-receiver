@@ -131,7 +131,7 @@ All configuration is environment variables (see also `.env.example`).
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
 | `RETENTION_DAYS` | `0` (disabled) | Initial retention default. An administrator can override it under **Settings**; once saved there, the UI value wins and applies on the maintenance timer’s next run |
-| `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations) |
+| `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations). |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
 
 Put the HTTP listener behind a TLS-terminating reverse proxy in
@@ -389,6 +389,11 @@ the receiver GETs
 account's API key as Basic auth, stores the pretty-printed JSON on the
 call, and fills any still-empty identity/disposition fields from it
 (recording-owned fields are never overwritten).
+
+The fetch refuses an AccountSid or CallSid that is not `AC`/`CA` plus
+32 hex digits (both come from notifications and SIP URI parameters and
+end up in the request path), so a crafted SID cannot steer the
+request, and the account's key, to another endpoint.
 
 Because VoiceML keys are per-account, an administrator stores
 one key per AccountSid under **Integrations** in the UI (with
