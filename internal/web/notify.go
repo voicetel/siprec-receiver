@@ -137,11 +137,7 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 
 	durationSec, _ := strconv.Atoi(firstNonEmpty(fields["CallDuration"], fields["Duration"]))
 	sipCode, _ := strconv.Atoi(fields["SipResponseCode"])
-	seq, eventTime, err := parseDispositionOrder(fields)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+	seq, eventTime := parseDispositionOrder(fields)
 
 	n := store.DispositionNotification{
 		SequenceNumber: seq,
@@ -279,24 +275,39 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 	return fields, string(body)
 }
 
-func parseDispositionOrder(fields map[string]string) (*int64, time.Time, error) {
+// dispositionTimeLayouts are the Timestamp shapes accepted: RFC 3339
+// and RFC 2822 (VoiceML and Twilio send RFC 1123Z), including single-
+// digit days.
+var dispositionTimeLayouts = []string{
+	time.RFC3339Nano, time.RFC1123Z, time.RFC1123,
+	"Mon, 2 Jan 2006 15:04:05 -0700", "Mon, 2 Jan 2006 15:04:05 MST",
+}
+
+// parseDispositionOrder reads the event-order fields. One that does not
+// parse is logged and ignored: losing its order is better than losing
+// the call's final outcome by rejecting the whole callback.
+func parseDispositionOrder(fields map[string]string) (*int64, time.Time) {
 	var seq *int64
+
 	if value := fields["SequenceNumber"]; value != "" {
-		n, err := strconv.ParseInt(value, 10, 64)
-		if err != nil || n < 0 {
-			return nil, time.Time{}, errors.New("invalid SequenceNumber")
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil && n >= 0 {
+			seq = &n
+		} else {
+			log.Printf("[notify] ignoring unparseable SequenceNumber %q (CallSid=%q)", value, fields["CallSid"])
 		}
-		seq = &n
 	}
+
 	if value := fields["Timestamp"]; value != "" {
-		for _, layout := range []string{time.RFC3339Nano, time.RFC1123Z, time.RFC1123} {
+		for _, layout := range dispositionTimeLayouts {
 			if at, err := time.Parse(layout, value); err == nil {
-				return seq, at, nil
+				return seq, at
 			}
 		}
-		return nil, time.Time{}, errors.New("invalid Timestamp")
+
+		log.Printf("[notify] ignoring unparseable Timestamp %q (CallSid=%q)", value, fields["CallSid"])
 	}
-	return seq, time.Time{}, nil
+
+	return seq, time.Time{}
 }
 
 func firstNonEmpty(vs ...string) string {

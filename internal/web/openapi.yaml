@@ -1012,11 +1012,11 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Optional call event sequence; duplicate and older events are ignored.
+          description: Optional call event sequence; duplicate and older events are ignored. A value that does not parse is ignored (the event is still logged, without ordering).
           example: 3
         Timestamp:
           type: string
-          description: Optional event time (RFC 3339 or RFC 1123); used when sequence numbers cannot be compared.
+          description: Optional event time (RFC 3339 or RFC 2822/1123); used when sequence numbers cannot be compared. On a tie a terminal outcome beats a nonterminal one. A value that does not parse is ignored.
           example: '2026-10-21T12:00:00Z'
         CallSid:
           $ref: '#/components/schemas/CallSidField'
