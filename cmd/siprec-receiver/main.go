@@ -320,6 +320,11 @@ func main() {
 	base.SetFinalizer(store.Finalizer{S: st})
 	base.SetLimits(cfg.AllowCIDRs, cfg.MaxSessions, cfg.SessionIdle)
 
+	// The SIP listeners outlive the signal: Shutdown finalizes every
+	// recording and BYEs its SRC through them before they close.
+	sipCtx, sipCancel := context.WithCancel(context.Background())
+	defer sipCancel()
+
 	serveErr := make(chan error, 4)
 
 	var wg sync.WaitGroup
@@ -339,7 +344,7 @@ func main() {
 	for _, network := range cfg.SIPNetworks {
 		inst := base.Clone()
 
-		serve(func() error { return inst.Serve(ctx, network, cfg.SIPListen) })
+		serve(func() error { return inst.Serve(sipCtx, network, cfg.SIPListen) })
 	}
 
 	if cfg.SIPTLSCert != "" {
@@ -351,7 +356,7 @@ func main() {
 		inst := base.Clone()
 		tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
 
-		serve(func() error { return inst.ServeTLS(ctx, cfg.SIPTLSListen, tlsConf) })
+		serve(func() error { return inst.ServeTLS(sipCtx, cfg.SIPTLSListen, tlsConf) })
 	}
 
 	authn := auth.New(auth.Config{
@@ -397,17 +402,19 @@ func main() {
 		log.Printf("[main] shutting down")
 	}
 
-	// Ordered teardown: stop taking HTTP work, drain active SIPREC
-	// sessions into the store (finalizes WAVs + rows), wait for the
-	// SIP listeners to exit, and only then close the store.
-	cancel()
+	// Ordered teardown: finalize every active SIPREC session into the
+	// store and BYE its SRC while the SIP listeners still run, then
+	// close the listeners, drain HTTP (longer than a VoiceML fetch can
+	// take), stop maintenance, and only then close the store.
+	base.Shutdown()
+	sipCancel()
+	wg.Wait()
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), httpDrainTimeout)
 	_ = httpSrv.Shutdown(shutdownCtx)
 	shutdownCancel()
 
-	base.Shutdown()
-	wg.Wait()
+	cancel()
 	maintenance.Wait()
 
 	if err := st.Close(); err != nil {
@@ -481,6 +488,11 @@ func ephemeralSecret() string {
 
 	return hex.EncodeToString(b)
 }
+
+// httpDrainTimeout bounds the HTTP drain at shutdown. It exceeds the
+// VoiceML fetch timeout (15 s), so an in-flight record fetch finishes
+// before the store closes under it.
+const httpDrainTimeout = 20 * time.Second
 
 // randomOffset is a random non-negative int below 65536 from
 // crypto/rand, whose Read never returns an error.

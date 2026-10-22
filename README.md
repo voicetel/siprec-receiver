@@ -265,7 +265,10 @@ without needing the recording dialog's SIP Call-ID.
   finalizes the call. A dialog that never sends BYE is finalized by
   the idle reaper after `SIPREC_SESSION_IDLE_SEC` without SIP or RTP
   activity, and a graceful shutdown finalizes every active session
-  before exiting — recordings are not stranded by restarts.
+  before exiting — recordings are not stranded by restarts. In both
+  cases the SRS then sends its own BYE to the SRC's Contact (bounded
+  to 2 s, not retried), so the SRC stops forking audio at a port the
+  pool will reuse; mod_siprec v1.7.1+ stops its fork on that BYE.
 - **Crash recovery:** if the SRS itself dies mid-recording, the WAVs
   on disk are adopted at the next startup: their headers are repaired
   in place (a crashed file still carries the writer's placeholder

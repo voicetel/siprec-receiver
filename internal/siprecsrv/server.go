@@ -143,7 +143,8 @@ type Server struct {
 	shared  *sharedState
 	ua      *sipgo.UserAgent
 	srv     *sipgo.Server
-	contact string // this listener's Contact URI, set by Serve/ServeTLS
+	client  *sipgo.Client // sends the SRS's own BYEs (see sendBye)
+	contact string        // this listener's Contact URI, set by Serve/ServeTLS
 }
 
 // New builds the first Server of a family. Additional transports use
@@ -230,7 +231,8 @@ type session struct {
 	pending     bool // INVITE received, legs still being built
 	cancelled   bool // BYE/shutdown arrived while pending
 	answerVer   int
-	offer       *ParsedSDP // all offered m-lines, including declined streams
+	offer       *ParsedSDP  // all offered m-lines, including declined streams
+	peer        *dialogPeer // how to BYE the SRC; nil when the INVITE gave no Contact
 
 	lastActivity atomic.Int64 // unix nano: last SIP message or RTP frame
 }
@@ -406,7 +408,12 @@ func (s *Server) Serve(ctx context.Context, network, addr string) error {
 		return fmt.Errorf("siprecsrv: new server: %w", err)
 	}
 
-	s.ua, s.srv = ua, srv
+	cli, err := sipgo.NewClient(ua)
+	if err != nil {
+		return fmt.Errorf("siprecsrv: new client: %w", err)
+	}
+
+	s.ua, s.srv, s.client = ua, srv, cli
 	s.contact = contactFor(s.shared.localIP, network, addr)
 	s.syncFinalizer()
 	s.registerHandlers(srv)
@@ -433,7 +440,12 @@ func (s *Server) ServeTLS(ctx context.Context, addr string, conf *tls.Config) er
 		return fmt.Errorf("siprecsrv: new server: %w", err)
 	}
 
-	s.ua, s.srv = ua, srv
+	cli, err := sipgo.NewClient(ua)
+	if err != nil {
+		return fmt.Errorf("siprecsrv: new client: %w", err)
+	}
+
+	s.ua, s.srv, s.client = ua, srv, cli
 	s.contact = contactFor(s.shared.localIP, "tls", addr)
 	s.syncFinalizer()
 	s.registerHandlers(srv)
@@ -497,6 +509,7 @@ func (s *Server) Shutdown() {
 	for _, sess := range victims {
 		sh.finalizeSession(context.Background(), sess)
 	}
+	byeAll(victims)
 	sh.work.Wait()
 
 	if len(victims) > 0 {
@@ -567,6 +580,7 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 				log.Printf("[siprecsrv] reaping idle session call-id=%q paused=%v", sess.callID, sess.paused)
 				sh.finalizeSession(context.Background(), sess)
 			}
+			byeAll(victims)
 		}
 	}
 }
@@ -612,6 +626,127 @@ func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
 			log.Printf("[siprecsrv] %q: finalize leg %q: %v", sess.callID, l.label, err)
 		}
 	}
+}
+
+// byeTimeout bounds one SRS-initiated BYE transaction.
+var byeTimeout = 2 * time.Second
+
+// dialogPeer is what the SRS needs to end a recording dialog itself
+// (RFC 3261 §12.2.1.1, §15.1.1): the SRC's remote target (its Contact)
+// and route set, the two parties as the INVITE named them, our CSeq
+// space, and the client of the listener the INVITE arrived on.
+type dialogPeer struct {
+	client    *sipgo.Client
+	target    sip.Uri
+	routes    []sip.Uri
+	local     sip.Uri // the INVITE's To: this SRS
+	remote    sip.Uri // the INVITE's From: the SRC
+	localCSeq uint32
+}
+
+// peerFor captures the dialog peer from an INVITE. It returns nil when
+// the INVITE carries no Contact (RFC 3261 requires one): a BYE aimed at
+// the From URI instead could go anywhere.
+func (s *Server) peerFor(req *sip.Request) *dialogPeer {
+	contact, from, to := req.Contact(), req.From(), req.To()
+	if s.client == nil || contact == nil || from == nil || to == nil {
+		return nil
+	}
+
+	p := &dialogPeer{client: s.client, target: contact.Address, local: to.Address, remote: from.Address}
+
+	for _, h := range req.GetHeaders("Record-Route") {
+		if rr, ok := h.(*sip.RecordRouteHeader); ok {
+			p.routes = append(p.routes, rr.Address)
+		}
+	}
+
+	return p
+}
+
+// refreshed applies a re-INVITE's target refresh (RFC 3261 §12.2.2):
+// the new Contact and transport win, our CSeq space carries over. A
+// re-INVITE without a Contact keeps the dialog's peer as it was.
+func (p *dialogPeer) refreshed(next *dialogPeer) *dialogPeer {
+	if next == nil {
+		return p
+	}
+
+	if p != nil {
+		next.localCSeq = p.localCSeq
+	}
+
+	return next
+}
+
+// sendBye ends the dialog from the SRS side. The reaper and Shutdown
+// call it after finalizing a recording the SRC never hung up, so the SRC
+// stops forking audio at a port that is about to be reused (and, for
+// FreeSWITCH, hangs up its recording leg). Best effort and bounded: the
+// outcome is logged, never retried.
+func (sess *session) sendBye(ctx context.Context) {
+	p := sess.peer
+	p.localCSeq++
+
+	req := sip.NewRequest(sip.BYE, p.target)
+
+	from := &sip.FromHeader{Address: p.local, Params: sip.NewParams()}
+	from.Params.Add("tag", sess.toTag)
+
+	to := &sip.ToHeader{Address: p.remote, Params: sip.NewParams()}
+	if sess.fromTag != "" {
+		to.Params.Add("tag", sess.fromTag)
+	}
+
+	callID := sip.CallIDHeader(sess.callID)
+
+	req.AppendHeader(from)
+	req.AppendHeader(to)
+	req.AppendHeader(&callID)
+	req.AppendHeader(&sip.CSeqHeader{SeqNo: p.localCSeq, MethodName: sip.BYE})
+
+	for _, r := range p.routes {
+		req.AppendHeader(&sip.RouteHeader{Address: r})
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, byeTimeout)
+	defer cancel()
+
+	tx, err := p.client.TransactionRequest(ctx, req)
+	if err != nil {
+		log.Printf("[siprecsrv] BYE call-id=%q to %s: %v", sess.callID, p.target.String(), err)
+
+		return
+	}
+	defer tx.Terminate()
+
+	select {
+	case res := <-tx.Responses():
+		log.Printf("[siprecsrv] BYE call-id=%q to %s: %d %s", sess.callID, p.target.String(), res.StatusCode, res.Reason)
+	case <-ctx.Done():
+		log.Printf("[siprecsrv] BYE call-id=%q to %s: no answer within %s", sess.callID, p.target.String(), byeTimeout)
+	}
+}
+
+// byeAll sends the SRS's BYE for every finalized session that can be
+// addressed, concurrently, and waits for them all.
+func byeAll(sessions []*session) {
+	var wg sync.WaitGroup
+
+	for _, sess := range sessions {
+		if sess.peer == nil {
+			continue
+		}
+
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+			sess.sendBye(context.Background())
+		}()
+	}
+
+	wg.Wait()
 }
 
 // allowedSource enforces the family's source CIDR allowlist. An empty
@@ -925,6 +1060,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 		existing.paused = parsed.AllInactive()
 		existing.offer = parsed
+		existing.peer = existing.peer.refreshed(s.peerFor(req))
 		if seq := req.CSeq(); seq != nil {
 			existing.remoteCSeq = seq.SeqNo
 		}
@@ -972,6 +1108,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		pending:     true,
 		offer:       parsed,
 		paused:      parsed.AllInactive(),
+		peer:        s.peerFor(req),
 	}
 	if seq := req.CSeq(); seq != nil {
 		sess.remoteCSeq = seq.SeqNo
@@ -979,6 +1116,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	if isReinvite {
 		sess.toTag = existing.toTag
 		sess.answerVer = existing.answerVer
+		sess.peer = existing.peer.refreshed(sess.peer)
 		if sess.accountSid == "" {
 			sess.accountSid = existing.accountSid
 		}
