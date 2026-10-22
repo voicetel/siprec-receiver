@@ -212,13 +212,21 @@ func (r *Receiver) loop() {
 			}
 		}
 
-		// Lock onto the first sender (address + SSRC); drop the rest.
+		// Lock onto the first sender (address + SSRC) of G.711 audio;
+		// drop the rest. Only a decodable packet may claim the leg:
+		// RTCP multiplexed onto the port (whose PT field reads 72-76),
+		// telephone-event or comfort noise arriving first would
+		// otherwise lock out the audio stream for the whole call.
 		src := ""
 		if addr != nil {
 			src = addr.String()
 		}
 
 		if !r.locked {
+			if header.PayloadType != PayloadPCMU && header.PayloadType != PayloadPCMA {
+				continue
+			}
+
 			r.locked, r.srcAddr, r.ssrc = true, src, header.SSRC
 		} else if src != r.srcAddr || header.SSRC != r.ssrc {
 			r.dropLogOnce.Do(func() {

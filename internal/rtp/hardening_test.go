@@ -147,6 +147,39 @@ func TestReceiver_LocksToFirstSender(t *testing.T) {
 	}
 }
 
+// Only G.711 audio can claim the leg. RTCP multiplexed onto the port, a
+// telephone-event or a comfort-noise packet arriving first from another
+// socket must not lock out the real audio sender.
+func TestReceiver_LocksOnlyOnAudio(t *testing.T) {
+	_, port, fc := startReceiver(t, "127.0.0.1")
+	noise := dial(t, port)
+	audio := dial(t, port)
+
+	rtcp := rtpPacket(0, 0, 0xcccc, 0, make([]byte, 16), 0)
+	rtcp[1] = 200 // RTCP SR: PT field reads 72 with the marker bit set
+
+	for _, pkt := range [][]byte{
+		rtcp,
+		rtpPacket(1, 0, 0xdddd, 101, []byte{1, 0, 0, 160}, 0), // telephone-event
+		rtpPacket(1, 0, 0xdddd, 13, []byte{40}, 0),            // comfort noise
+	} {
+		if _, err := noise.Write(pkt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Give the receiver time to see all three before the audio arrives.
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := audio.Write(rtpPacket(7, 1120, 0xeeee, 8, silence(160), 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := fc.next(t, "audio frame"); len(got) != 160 {
+		t.Errorf("samples = %d, want 160", len(got))
+	}
+}
+
 // A timestamp jump (lost packets / silence suppression) becomes
 // silence in the output, keeping duration honest: 160 samples, then
 // a packet 480 timestamps later, yields a 320-sample silence fill
