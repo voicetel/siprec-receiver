@@ -218,7 +218,10 @@ without needing the recording dialog's SIP Call-ID.
   stream with an SRS-pool port, the chosen G.711 payload type (the first
   offered PCMU/PCMA, dynamic payload types included; the answer always
   uses the static PT), `a=recvonly` (`a=inactive` for an inactive
-  offer), the offer's `a=label` echoed, a `Contact` for the dialog,
+  offer), plus a session-level `a=recvonly` (FreeSWITCH clears the
+  recording leg's RTP timeout only for that; without it a profile's
+  `rtp-timeout-sec` hangs a long recording up, as the SRS sends no RTP
+  back), the offer's `a=label` echoed, a `Contact` for the dialog,
   and an `o=` version that increases on every re-INVITE answer.
   Offered port-0 streams are answered port 0 and never recorded.
   (Some SRC answer-side parsers do not extract SDP from a multipart

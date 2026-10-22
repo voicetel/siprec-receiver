@@ -234,6 +234,13 @@ func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []in
 	b.WriteString(localIP)
 	b.WriteString("\r\n")
 	b.WriteString("t=0 0\r\n")
+	// Session-level recvonly as well as per stream: FreeSWITCH clears a
+	// leg's RTP timeout only for a session-level a=recvonly, and the SRS
+	// never sends RTP back, so with only the media-level attribute the
+	// SRC's profile rtp-timeout-sec (300 s in the vanilla profiles)
+	// hangs the recording leg up mid-call. A media-level a=inactive
+	// still overrides it for a paused stream (RFC 4566 §6).
+	b.WriteString("a=recvonly\r\n")
 
 	// media-level: one block per offered stream
 	for i, m := range offer.Media {

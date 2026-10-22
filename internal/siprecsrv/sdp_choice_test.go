@@ -105,9 +105,24 @@ func TestBuildAnswerSDP_PortZeroStream(t *testing.T) {
 		t.Errorf("answer port handling wrong:\n%s", answer)
 	}
 
-	if strings.Count(answer, "a=recvonly") != 1 {
+	session, media := splitAnswer(answer)
+	if strings.Count(media, "a=recvonly") != 1 {
 		t.Errorf("declined stream got direction attributes:\n%s", answer)
 	}
+
+	if !strings.Contains(session, "a=recvonly\r\n") {
+		t.Errorf("answer lacks the session-level a=recvonly:\n%s", answer)
+	}
+}
+
+// splitAnswer cuts an SDP answer at its first m= line.
+func splitAnswer(answer string) (session, media string) {
+	i := strings.Index(answer, "m=")
+	if i < 0 {
+		return answer, ""
+	}
+
+	return answer[:i], answer[i:]
 }
 
 // Re-INVITE answers bump the o= session version (RFC 3264 §8) and an
@@ -130,7 +145,11 @@ func TestBuildAnswerSDP_VersionAndInactive(t *testing.T) {
 		t.Errorf("o= version not bumped:\n%s", answer)
 	}
 
-	if !strings.Contains(answer, "a=inactive\r\n") || strings.Contains(answer, "a=recvonly") {
+	// The session-level a=recvonly stays (FreeSWITCH keeps the leg's RTP
+	// timeout off with it); the stream's a=inactive overrides it.
+	session, media := splitAnswer(answer)
+	if !strings.Contains(media, "a=inactive\r\n") || strings.Contains(media, "a=recvonly") ||
+		!strings.Contains(session, "a=recvonly\r\n") {
 		t.Errorf("inactive offer not answered inactive:\n%s", answer)
 	}
 }
