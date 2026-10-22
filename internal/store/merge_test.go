@@ -258,17 +258,70 @@ func TestMerge_DispositionOrderAndFill(t *testing.T) {
 }
 
 func TestMergedStart(t *testing.T) {
-	cases := []struct{ keep, drop, want int64 }{
-		{0, 5, 5},
-		{7, 5, 5},
-		{5, 7, 5},
-		{5, 0, 5},
+	rec := func(at int64) mergeRow { return mergeRow{status: "completed", startedAt: at} }
+	note := func(at int64) mergeRow { return mergeRow{status: "notified", startedAt: at} }
+
+	cases := []struct {
+		name       string
+		keep, drop mergeRow
+		want       int64
+	}{
+		{"recording wins over an earlier webhook", rec(9), note(5), 9},
+		{"folded recording wins over the survivor's webhook time", note(5), rec(9), 9},
+		{"two recordings: earliest", rec(9), rec(7), 7},
+		{"two placeholders: earliest", note(5), note(7), 5},
+		{"survivor without a time", note(0), note(7), 7},
+		{"folded row without a time", rec(9), rec(0), 9},
 	}
 
 	for _, tc := range cases {
-		if got := mergedStart(mergeRow{startedAt: tc.keep}, mergeRow{startedAt: tc.drop}); got != tc.want {
-			t.Errorf("mergedStart(%d, %d) = %d, want %d", tc.keep, tc.drop, got, tc.want)
+		if got := mergedStart(tc.keep, tc.drop); got != tc.want {
+			t.Errorf("%s: mergedStart = %d, want %d", tc.name, got, tc.want)
 		}
+	}
+}
+
+// A recording claiming an AMD placeholder takes the recording's start
+// time, not the time the webhook arrived (which, for a terminal callback
+// processed before the BYE, equals the end of the call).
+func TestRecordLeg_ClaimedPlaceholderTakesRecordingStart(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const callSid = "CA0000000000000000000000000000ab12"
+
+	id, _, err := s.ApplyAMD(ctx, AMDNotification{CallSid: callSid, AnsweredBy: "human"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now().Add(-90 * time.Second).UTC().Truncate(time.Millisecond)
+
+	if err := s.RecordLeg(ctx, siprecsrv.FinalizedLeg{
+		CallID: "dlg-start", CallSid: callSid, WAVPath: "/rec/s.wav", DurationSec: 90, StartedAt: started,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, _ := s.GetCall(ctx, id)
+	if !c.StartedAt.Equal(started) {
+		t.Errorf("started_at = %s, want the recording's start %s", c.StartedAt, started)
+	}
+
+	// A later leg (another dialog) that started earlier moves it back; one
+	// that started later does not.
+	earlier := started.Add(-time.Minute)
+	for _, at := range []time.Time{started.Add(time.Minute), earlier} {
+		if err := s.RecordLeg(ctx, siprecsrv.FinalizedLeg{
+			CallID: "dlg-start-" + at.Format("150405.000"), CallSid: callSid,
+			WAVPath: "/rec/" + at.Format("150405.000") + ".wav", StartedAt: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if c, _ := s.GetCall(ctx, id); !c.StartedAt.Equal(earlier) {
+		t.Errorf("started_at = %s, want the earliest dialog's %s", c.StartedAt, earlier)
 	}
 }
 

@@ -559,7 +559,10 @@ VALUES (CASE WHEN EXISTS (SELECT 1 FROM calls WHERE sip_call_id = ?) THEN NULL E
 
 // refreshRecordedCall writes the recording-owned fields onto the call's
 // existing row. AMD, disposition and fetched-record fields are left as
-// the notifications set them.
+// the notifications set them. The call starts when its recording does
+// (a placeholder's started_at is only when its first webhook arrived);
+// with several dialogs the earliest start wins, whichever dialog's legs
+// are finalized first.
 func refreshRecordedCall(ctx context.Context, tx *sql.Tx, id int64, leg siprecsrv.FinalizedLeg,
 	fromNumber, toNumber, metaJSON string, now time.Time,
 ) error {
@@ -572,7 +575,8 @@ UPDATE calls SET
 	from_uri      = CASE WHEN ? != '' THEN ? ELSE from_uri END,
 	from_number   = CASE WHEN ? != '' THEN ? ELSE from_number END,
 	to_number     = CASE WHEN ? != '' THEN ? ELSE to_number END,
-	started_at    = CASE WHEN started_at = 0 THEN ? ELSE started_at END,
+	started_at    = CASE WHEN status != 'completed' OR started_at = 0 OR (? > 0 AND ? < started_at)
+		THEN ? ELSE started_at END,
 	ended_at      = MAX(ended_at, ?),
 	status        = 'completed',
 	metadata_json = CASE WHEN ? != '' THEN ? ELSE metadata_json END,
@@ -581,7 +585,7 @@ UPDATE calls SET
 WHERE id = ?`,
 		leg.CallID, leg.CallID, leg.FsUUID, leg.FsUUID, leg.AccountSid, leg.AccountSid,
 		leg.FromURI, leg.FromURI, fromNumber, fromNumber, toNumber, toNumber,
-		millis(leg.StartedAt), millis(now), metaJSON, metaJSON,
+		millis(leg.StartedAt), millis(leg.StartedAt), millis(leg.StartedAt), millis(now), metaJSON, metaJSON,
 		leg.MetadataXML, leg.MetadataXML, millis(now), id)
 	if err != nil {
 		return fmt.Errorf("store: update call %d: %w", id, err)

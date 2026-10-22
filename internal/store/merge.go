@@ -284,14 +284,22 @@ func mergeCalls(ctx context.Context, tx *sql.Tx, keepID, dropID int64) error {
 	return refreshDuration(ctx, tx, keepID)
 }
 
-// mergedStart keeps the survivor's start time; the earliest non-zero one
-// when the survivor has none.
+// mergedStart is the merged call's start: a recording's start wins over
+// a placeholder's (which is only when its first webhook arrived), and
+// otherwise the earliest non-zero time.
 func mergedStart(keep, drop mergeRow) int64 {
-	if keep.startedAt == 0 || (drop.startedAt != 0 && drop.startedAt < keep.startedAt) {
-		return drop.startedAt
-	}
+	keepRec, dropRec := keep.status == "completed", drop.status == "completed"
 
-	return keep.startedAt
+	switch {
+	case dropRec && !keepRec:
+		return drop.startedAt
+	case keepRec && !dropRec:
+		return keep.startedAt
+	case keep.startedAt == 0 || (drop.startedAt != 0 && drop.startedAt < keep.startedAt):
+		return drop.startedAt
+	default:
+		return keep.startedAt
+	}
 }
 
 // takeDisposition reports whether the dropped row's disposition should
