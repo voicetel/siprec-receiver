@@ -230,7 +230,10 @@ without needing the recording dialog's SIP Call-ID.
   dialog may start on UDP and end on TCP). In-dialog requests (BYE,
   re-INVITE) must match the INVITE's From-tag and source IP, or they
   get 481 and the recording is untouched — knowing a Call-ID is not
-  enough to stop or replace someone else's recording.
+  enough to stop or replace someone else's recording. A BYE, or a
+  To-tagged re-INVITE, for a dialog the SRS does not have (it already
+  ended, or was lost in a restart) also gets 481 (RFC 3261 §12.2.2)
+  instead of opening an empty recording.
 - **Recorded files:** `<RECORDING_DIR>/<random>.wav` — server-generated
   names opened with `O_EXCL`, so a reused or colliding Call-ID can
   never overwrite an existing recording, and filenames leak neither

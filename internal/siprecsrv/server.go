@@ -780,15 +780,8 @@ func (sess *session) dialogMismatch(req *sip.Request) bool {
 			return true
 		}
 	}
-	if sess.toTag != "" {
-		to := req.To()
-		if to == nil {
-			return true
-		}
-		tag, _ := to.Params.Get("tag")
-		if tag != sess.toTag {
-			return true
-		}
+	if sess.toTag != "" && toTagOf(req) != sess.toTag {
+		return true
 	}
 
 	if sess.srcIP != "" {
@@ -803,6 +796,16 @@ func (sess *session) dialogMismatch(req *sip.Request) bool {
 func fromTagOf(req *sip.Request) string {
 	if f := req.From(); f != nil {
 		tag, _ := f.Params.Get("tag")
+
+		return tag
+	}
+
+	return ""
+}
+
+func toTagOf(req *sip.Request) string {
+	if to := req.To(); to != nil {
+		tag, _ := to.Params.Get("tag")
 
 		return tag
 	}
@@ -898,24 +901,25 @@ func (s *Server) onBye(req *sip.Request, tx sip.ServerTransaction) {
 		return
 	}
 
-	pending := ok && sess.pending
+	if !ok {
+		sh.mu.Unlock()
+		// RFC 3261 §15.1.2: a BYE that matches no dialog gets 481.
+		log.Printf("[siprecsrv] BYE for unknown call-id=%q", callID)
+		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
+
+		return
+	}
+
+	pending := sess.pending
 	if pending {
 		sess.cancelled = true
 	}
-	if ok {
-		delete(sh.sessions, callID)
-	}
+	delete(sh.sessions, callID)
 	sh.mu.Unlock()
 
 	// Answer first: finalizing writes WAV headers and database rows,
 	// which must not delay the 200 and invite BYE retransmissions.
 	s.respond(req, tx, sip.StatusOK, "OK", nil, "")
-
-	if !ok {
-		log.Printf("[siprecsrv] BYE for unknown call-id=%q", callID)
-
-		return
-	}
 
 	if pending {
 		// The INVITE is still being built; flag it and let the
@@ -1017,6 +1021,17 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 
 	sh.mu.Lock()
 	existing, isReinvite := sh.sessions[callID]
+
+	// An INVITE with a To-tag is a re-INVITE (RFC 3261 §12.2.2); one for
+	// a dialog this SRS does not have (ended, or lost in a restart) gets
+	// 481 rather than a new, metadata-less recording of nothing.
+	if !isReinvite && toTagOf(req) != "" {
+		sh.mu.Unlock()
+		log.Printf("[siprecsrv] re-INVITE for unknown call-id=%q", callID)
+		s.respond(req, tx, sip.StatusCallTransactionDoesNotExists, "Call/Transaction Does Not Exist", nil, "")
+
+		return
+	}
 
 	if isReinvite && existing.pending {
 		sh.mu.Unlock()

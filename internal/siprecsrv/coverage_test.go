@@ -528,8 +528,9 @@ func TestCov_OnByeBranches(t *testing.T) {
 	tx := newRecordingTx()
 	srv.onBye(covRequest(sip.BYE, "cov-unknown", covFrom, "", nil, ""), tx)
 
-	if code := tx.only(t).StatusCode; code != sip.StatusOK {
-		t.Errorf("BYE unknown call = %d, want 200", code)
+	// RFC 3261 §15.1.2: a BYE that matches no dialog gets 481.
+	if code := tx.only(t).StatusCode; code != sip.StatusCallTransactionDoesNotExists {
+		t.Errorf("BYE unknown call = %d, want 481", code)
 	}
 
 	pending := &session{callID: "cov-bye-pending", pending: true}
