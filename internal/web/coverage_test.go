@@ -793,7 +793,7 @@ func TestCov_NotifyJSONAndQuery(t *testing.T) {
 	}
 
 	r = covNotify(t, e.srv.URL+"/api/notify/disposition", "application/json",
-		`{"call_sid":"CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","call_status":"busy","duration":7,`+
+		`{"call_sid":"CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","call_status":"busy","call_duration":7,`+
 			`"sip_response_code":486,"error_code":"E1","error_message":"busy here"}`, bearer)
 	wantStatus(t, "json disposition", r, http.StatusOK)
 

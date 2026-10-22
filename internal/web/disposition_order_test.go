@@ -90,3 +90,28 @@ func TestNotifyDispositionIgnoresLateEvents(t *testing.T) {
 		t.Fatalf("outcome: %+v, %v", c, err)
 	}
 }
+
+// Duration is minutes in a Twilio-shaped StatusCallback; only
+// CallDuration (seconds) is the call's billable length.
+func TestNotifyDispositionIgnoresDurationMinutes(t *testing.T) {
+	f := newFixture(t, adminEmail)
+	id := seedCallWithIDs(t, f)
+
+	form := url.Values{"CallSid": {"CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "CallStatus": {"completed"}, "Duration": {"2"}}
+	req, err := http.NewRequest(http.MethodPost, f.srv.URL+"/api/notify/disposition", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+secret)
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = res.Body.Close()
+
+	if c, _ := f.store.GetCall(context.Background(), id); c.DispStatus != "completed" || c.DispDurationSec != 0 {
+		t.Errorf("outcome = %q %d s, want completed and no duration from minutes", c.DispStatus, c.DispDurationSec)
+	}
+}

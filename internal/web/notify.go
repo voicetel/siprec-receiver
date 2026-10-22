@@ -135,7 +135,9 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	durationSec, _ := strconv.Atoi(firstNonEmpty(fields["CallDuration"], fields["Duration"]))
+	// CallDuration is seconds. Twilio-shaped senders' Duration is the
+	// call rounded up to whole minutes, so it is not a fallback.
+	durationSec, _ := strconv.Atoi(fields["CallDuration"])
 	sipCode, _ := strconv.Atoi(fields["SipResponseCode"])
 	seq, eventTime := parseDispositionOrder(fields)
 
@@ -238,8 +240,8 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 				"from":                       "From", "to": "To", "call_status": "CallStatus",
 				"direction": "Direction", "sip_call_id": "SipCallId",
 				"fs_uuid": "FsUuid", "call_duration": "CallDuration",
-				"duration": "Duration", "sip_response_code": "SipResponseCode",
-				"error_code": "ErrorCode", "error_message": "ErrorMessage",
+				"sip_response_code": "SipResponseCode",
+				"error_code":        "ErrorCode", "error_message": "ErrorMessage",
 				"sequence_number": "SequenceNumber", "timestamp": "Timestamp",
 			}
 			for k, canon := range alias {

@@ -369,7 +369,7 @@ keys, upsert semantics, and response codes as the AMD endpoint, except
 |---|---|
 | `CallStatus` | **Required.** `completed`, `busy`, `no-answer`, `failed`, `canceled`, … (stored verbatim) |
 | `SequenceNumber` / `Timestamp` | Optional event order. Duplicate/older events are ignored; terminal results cannot be replaced by nonterminal events, and on a same-second `Timestamp` tie a terminal result beats a nonterminal one. Without comparable ordering, the first terminal result is retained. A value that does not parse is logged and ignored, never a 400 |
-| `CallDuration` | Billable call seconds (kept separate from the recording's audio duration); `Duration` accepted |
+| `CallDuration` | Billable call seconds (kept separate from the recording's audio duration). `Duration` is not read: Twilio-shaped senders put the call's length in whole minutes there |
 | `SipResponseCode` | Final SIP response code, when the poster knows it |
 | `ErrorCode` / `ErrorMessage` | Failure detail |
 | `AnsweredBy` | Terminal callbacks repeat the AMD verdict; fills the AMD fields when still empty |

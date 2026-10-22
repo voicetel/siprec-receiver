@@ -1033,9 +1033,9 @@ components:
           example: 62
         Duration:
           type: integer
-          description: Accepted synonym of CallDuration.
+          description: Not read. Twilio-shaped senders put the call's length in whole minutes here; CallDuration is the billable seconds.
           minimum: 0
-          example: 62
+          example: 2
         SipResponseCode:
           type: integer
           description: The final SIP response code, when the poster knows it.
