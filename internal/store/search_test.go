@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,6 +80,41 @@ func TestListCalls_SearchByListingFields(t *testing.T) {
 				call.DispStatus == "" || call.AMDAnsweredBy == "" {
 				t.Errorf("%s: result is missing a retained listing field: %+v", tc.name, call)
 			}
+		}
+	}
+}
+
+// The list's exact-match filters are served by an index, not a scan of
+// every call.
+func TestFilterQueriesUseIndexes(t *testing.T) {
+	s := openTestStore(t)
+
+	for column, index := range map[string]string{
+		"disp_status":     "idx_calls_disp_status",
+		"amd_answered_by": "idx_calls_amd_answered_by",
+	} {
+		rows, err := s.db.Query(`EXPLAIN QUERY PLAN SELECT COUNT(*) FROM calls WHERE 1=1 AND `+column+` = ?`, "busy")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var plan strings.Builder
+
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatal(err)
+			}
+
+			plan.WriteString(detail + "\n")
+		}
+
+		_ = rows.Close()
+
+		if !strings.Contains(plan.String(), index) {
+			t.Errorf("filter on %s does not use %s:\n%s", column, index, plan.String())
 		}
 	}
 }

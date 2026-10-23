@@ -388,9 +388,13 @@ CREATE INDEX IF NOT EXISTS idx_legs_sip_call_id ON legs(sip_call_id);`); err != 
 		}
 	}
 
-	if _, err := s.db.ExecContext(ctx,
-		`CREATE INDEX IF NOT EXISTS idx_calls_parent_call_sid ON calls(parent_call_sid)`); err != nil {
-		return fmt.Errorf("store: migrate parent index: %w", err)
+	// The parent link, and the list's exact-match filters (its free-text
+	// search is a LIKE '%…%' no index can serve).
+	if _, err := s.db.ExecContext(ctx, `
+CREATE INDEX IF NOT EXISTS idx_calls_parent_call_sid ON calls(parent_call_sid);
+CREATE INDEX IF NOT EXISTS idx_calls_amd_answered_by ON calls(amd_answered_by);
+CREATE INDEX IF NOT EXISTS idx_calls_disp_status ON calls(disp_status);`); err != nil {
+		return fmt.Errorf("store: migrate call indexes: %w", err)
 	}
 
 	// Schema version stamp. Migrations above are idempotent

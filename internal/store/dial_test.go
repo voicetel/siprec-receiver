@@ -217,5 +217,5 @@ func TestMigrate_ParentIndexFails(t *testing.T) {
 	denyWhen(t, s, func(op int, arg1, _ string) bool {
 		return op == sqlite3.SQLITE_CREATE_INDEX && arg1 == "idx_calls_parent_call_sid"
 	})
-	wantErr(t, s.migrate(context.Background()), "migrate parent index")
+	wantErr(t, s.migrate(context.Background()), "migrate call indexes")
 }
