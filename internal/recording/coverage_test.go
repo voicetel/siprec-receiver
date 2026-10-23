@@ -263,13 +263,30 @@ func TestWriteHeaderPlaceholderFields(t *testing.T) {
 	}
 }
 
+// crashHeader is the header Writer leaves behind when the process dies
+// before Close: the SRS format with both size fields zero.
+func crashHeader() []byte {
+	h := make([]byte, 44)
+	copy(h[0:4], "RIFF")
+	copy(h[8:12], "WAVE")
+	copy(h[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(h[16:], 16)
+	binary.LittleEndian.PutUint16(h[20:], 1)
+	binary.LittleEndian.PutUint16(h[22:], 1)
+	binary.LittleEndian.PutUint32(h[24:], 8000)
+	binary.LittleEndian.PutUint32(h[28:], 16000)
+	binary.LittleEndian.PutUint16(h[32:], 2)
+	binary.LittleEndian.PutUint16(h[34:], 16)
+	copy(h[36:40], "data")
+
+	return h
+}
+
 func writeCrashedWAV(t *testing.T, dataBytes int) string {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "crashed.wav")
-	header := make([]byte, 44)
-	copy(header[0:4], "RIFF")
-	copy(header[8:12], "WAVE")
+	header := crashHeader()
 
 	if err := os.WriteFile(path, append(header, make([]byte, dataBytes)...), 0o600); err != nil {
 		t.Fatal(err)

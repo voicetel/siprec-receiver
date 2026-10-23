@@ -18,8 +18,11 @@ import (
 // and rewrites the two size fields in place. Files that are already
 // valid are left untouched.
 //
-// The sample rate is assumed to be 8000 Hz mono (the only format the
-// SRS writes); duration follows the Writer's round-up rule.
+// Only the exact header the Writer emits is repaired: fmt at 12 (16
+// bytes of 8000 Hz mono 16-bit PCM) and data at 36. Patching any other
+// WAV (one with a LIST chunk, another format, a file someone dropped
+// into the directory) at those offsets would corrupt it, so it is
+// refused and left alone. Duration follows the Writer's round-up rule.
 func RepairWAV(path string) (durationSec int, err error) {
 	f, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- path from the recording directory or a leg row
 	if err != nil {
@@ -44,6 +47,10 @@ func RepairWAV(path string) (durationSec int, err error) {
 
 	if string(header[0:4]) != "RIFF" || string(header[8:12]) != "WAVE" {
 		return 0, fmt.Errorf("repair wav %s: not a RIFF/WAVE file", path)
+	}
+
+	if !writerHeader(header) {
+		return 0, fmt.Errorf("repair wav %s: not a header this recorder writes (8000 Hz mono 16-bit PCM, data at 36)", path)
 	}
 
 	dataBytes := info.Size() - 44
@@ -80,4 +87,18 @@ func RepairWAV(path string) (durationSec int, err error) {
 	samples := dataBytes / 2
 
 	return ceilSeconds(samples, 8000), nil
+}
+
+// writerHeader reports whether a 44-byte header is the one Writer
+// emits for the SRS's format, size fields aside.
+func writerHeader(h []byte) bool {
+	le := binary.LittleEndian
+
+	return string(h[12:16]) == "fmt " && le.Uint32(h[16:20]) == 16 &&
+		le.Uint16(h[20:22]) == 1 && // PCM
+		le.Uint16(h[22:24]) == 1 && // mono
+		le.Uint32(h[24:28]) == 8000 &&
+		le.Uint32(h[28:32]) == 16000 && le.Uint16(h[32:34]) == 2 && // byte rate, block align
+		le.Uint16(h[34:36]) == 16 &&
+		string(h[36:40]) == "data"
 }

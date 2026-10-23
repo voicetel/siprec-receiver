@@ -298,7 +298,8 @@ without needing the recording dialog's SIP Call-ID.
   sizes), durations are recomputed from the audio present, and each
   becomes a normal `completed` call marked `recovered-orphan` in the
   direction field, started at the file's modification time. Files that
-  are not playable WAVs are logged and left alone.
+  are not WAVs this recorder writes (8 kHz mono 16-bit PCM with the data
+  chunk at byte 36) are logged and left alone, byte for byte.
 
 ## AMD call notifications
 
