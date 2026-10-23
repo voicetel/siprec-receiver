@@ -217,7 +217,7 @@ func (p *ParsedSDP) Unacceptable() *MediaWarning {
 }
 
 // AllInactive reports whether every offered audio stream is a=inactive —
-// the mod_siprec pause re-INVITE shape (RFC 7866 §6.4). An SRS must keep
+// the mod_siprec pause re-INVITE shape (RFC 7866 §7.1.1.1). An SRS must keep
 // the recording (and its files) open across a pause; no RTP arrives until
 // the matching sendonly resume re-INVITE.
 func (p *ParsedSDP) AllInactive() bool {

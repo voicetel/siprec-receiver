@@ -119,7 +119,7 @@ func buildModSiprecBody(fsUUID string) sipBody {
 // mod_siprec lifecycle: INVITE (mixed stream) -> pause re-INVITE
 // (a=inactive, SDP only) -> resume re-INVITE (a=sendonly) -> BYE.
 // The pause/resume must not finalize or split the recording (RFC 7866
-// §6.4); exactly one Finalize for the one leg at BYE.
+// §7.1.1.1); exactly one Finalize for the one leg at BYE.
 func TestServer_ModSiprecPauseResumeKeepsOneRecording(t *testing.T) {
 	dir := t.TempDir()
 	port := freeTCPPort(t)

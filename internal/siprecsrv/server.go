@@ -432,7 +432,7 @@ func (s *Server) Serve(ctx context.Context, network, addr string) error {
 	return srv.ListenAndServe(ctx, network, addr)
 }
 
-// ServeTLS is Serve over a TLS listener (SIPS, RFC 7866 §11.3) for
+// ServeTLS is Serve over a TLS listener (SIPS, RFC 7866 §12.1) for
 // SRCs configured with transport=tls.
 func (s *Server) ServeTLS(ctx context.Context, addr string, conf *tls.Config) error {
 	ua, err := sipgo.NewUA(sipgo.WithUserAgent("siprec-receiver"))
@@ -1129,7 +1129,7 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 	}
 
 	// Re-INVITE on a live dialog. mod_siprec pause/resume (RFC 7866
-	// §6.4) re-INVITEs with SDP only: a=inactive pauses, a=sendonly
+	// §7.1.1.1) re-INVITEs with SDP only: a=inactive pauses, a=sendonly
 	// resumes. Neither may split the recording — keep the same ports,
 	// receivers and WAV writers, and just re-answer. Only a re-INVITE
 	// that changes the offered media shape falls through to the

@@ -46,14 +46,14 @@ endpoint, and the web UI are new in this repository.
 
 | Concept | Spec | Status |
 |---|---|---|
-| SIPREC INVITE with multipart SDP + RS-Metadata | [RFC 7866 §6.1.2][rfc7866-6.1] / [RFC 2046][rfc2046] | ✅ SDP part required; metadata part optional (recording proceeds with positional leg labels) |
+| SIPREC INVITE with multipart SDP + RS-Metadata | [RFC 7866 §6.1.1][rfc7866-6.1.1] / [§9.1][rfc7866-9.1] / [RFC 2046][rfc2046] | ✅ SDP part required; metadata part optional (recording proceeds with positional leg labels) |
 | `Require: siprec` / `+sip.src` handling | [RFC 7866 §6.2][rfc7866-6.2] | ✅ Accepted; the SRS's own Contact carries `+sip.srs` (a `sips:` URI on the TLS listener) |
-| Answer shape | [RFC 7866 §7][rfc7866-7] | ✅ Plain `application/sdp` 200 OK (never multipart), one `recvonly` `m=audio` per offered stream, `a=label` echoed |
-| Mixed (single-stream) recording | [RFC 7866 §7][rfc7866-7] | ✅ One WAV leg per call (both directions already mixed by the SRC) |
-| Separate RX/TX streams | [RFC 7866 §7][rfc7866-7] / [§8.5][rfc7866-8.5] | ✅ Two WAV legs per call, labelled from RS-Metadata participants |
-| Pause / resume re-INVITE | [RFC 7866 §6.4][rfc7866-6.4] | ✅ `a=inactive` / `a=sendonly` re-INVITEs re-answer on the same ports and keep writing the same files — a pause never splits the recording |
-| BYE teardown | [RFC 7866 §6.4][rfc7866-6.4] | ✅ Closes WAVs, releases RTP ports, finalizes the call row |
-| Re-INVITE replacing media shape | [RFC 7866 §6.4][rfc7866-6.4] | ✅ Prior session is finalized, a fresh one is recorded |
+| Answer shape | [RFC 7866 §7.2][rfc7866-7.2] | ✅ Plain `application/sdp` 200 OK (never multipart), one `recvonly` `m=audio` per offered stream, `a=label` echoed |
+| Mixed (single-stream) recording | [RFC 7866 §8.3.2][rfc7866-8.3.2] | ✅ One WAV leg per call (both directions already mixed by the SRC) |
+| Separate RX/TX streams | [RFC 7866 §8.3.1][rfc7866-8.3.1] | ✅ Two WAV legs per call, labelled from RS-Metadata participants |
+| Pause / resume re-INVITE | [RFC 7866 §7.1.1.1][rfc7866-7.1.1.1] | ✅ The SRC pauses each stream with `a=inactive` and resumes with `a=sendonly`; both re-INVITEs (or UPDATEs) re-answer on the same ports and keep writing the same files, so a pause never splits the recording. A paused dialog's idle timeout is 24 h instead of `SIPREC_SESSION_IDLE_SEC`. No RTP arrives while paused and only gaps under 2 s are filled with silence, so a pause is cut out of the WAV rather than kept as silence |
+| BYE teardown | [RFC 7866 §5.1][rfc7866-5.1] | ✅ Closes WAVs, releases RTP ports, finalizes the call row |
+| Re-INVITE replacing media shape | [RFC 7866 §7.1.1.1][rfc7866-7.1.1.1] | ✅ Prior session is finalized, a fresh one is recorded |
 | UPDATE / session timers | [RFC 3311](https://datatracker.ietf.org/doc/html/rfc3311) / [RFC 4028](https://datatracker.ietf.org/doc/html/rfc4028) / [RFC 7866 §9.2][rfc7866-9.2] | ✅ UPDATE refreshes, pauses/resumes (same media shape) and carries RS-Metadata; `Session-Expires` is echoed with the SRC as refresher (422 below 90 s); an SDP-less re-INVITE is re-offered the current SDP |
 | `<recording>` / `<datamode>` / `<group>` / `<session>` | [RFC 7865 App. A][rfc7865] | ✅ Parsed, persisted (raw XML + normalized JSON) |
 | `<participant>` AORs (`<nameID aor>`) | [RFC 7865 App. A][rfc7865] | ✅ Caller/callee numbers derived from participants; used as leg labels |
@@ -61,18 +61,22 @@ endpoint, and the web UI are new in this repository.
 | `<stream>` + `<participantstreamassoc>` label mapping | [RFC 7865 App. A][rfc7865] | ✅ Stream → sending participant resolution for leg naming |
 | G.711 PCMU / PCMA, 8 kHz | [RFC 3551](https://datatracker.ietf.org/doc/html/rfc3551) | ✅ The only offered codecs; WAV is 16-bit mono PCM at 8 kHz |
 | RTP loss accounting | [RFC 3550 §5.1][rfc3550] | ✅ Sequence-gap tracking in the receiver |
-| Transports | [RFC 7866 §11.3][rfc7866-11.3] | ✅ UDP + TCP; ✅ SIPS/TLS when `SIP_TLS_CERT`/`SIP_TLS_KEY` are set |
-| SRTP recording media | [RFC 7866 §11.2][rfc7866-11.2] | ❌ Not supported — an SRTP offer is refused with 488 + `Warning: 302` (mod_siprec cannot offer SDES) |
+| Transports | [RFC 7866 §12.1][rfc7866-12.1] | ✅ UDP + TCP; ✅ SIPS/TLS when `SIP_TLS_CERT`/`SIP_TLS_KEY` are set |
+| SRTP recording media | [RFC 7866 §8.1.2][rfc7866-8.1.2] / [§12.2][rfc7866-12.2] | ❌ Not supported — an SRTP offer is refused with 488 + `Warning: 302` (mod_siprec cannot offer SDES) |
 | IPv6 | [RFC 4566 §5.7][rfc4566] | ❌ SDP answers advertise IPv4 (`c=IN IP4`); run the SRS on IPv4 |
 
-[rfc7866-6.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.1
-[rfc7866-9.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-9.2
+[rfc7866-5.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-5.1
+[rfc7866-6.1.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.1.1
 [rfc7866-6.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.2
-[rfc7866-6.4]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.4
-[rfc7866-7]: https://datatracker.ietf.org/doc/html/rfc7866#section-7
-[rfc7866-8.5]: https://datatracker.ietf.org/doc/html/rfc7866#section-8.5
-[rfc7866-11.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-11.2
-[rfc7866-11.3]: https://datatracker.ietf.org/doc/html/rfc7866#section-11.3
+[rfc7866-7.1.1.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-7.1.1.1
+[rfc7866-7.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-7.2
+[rfc7866-8.1.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-8.1.2
+[rfc7866-8.3.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-8.3.1
+[rfc7866-8.3.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-8.3.2
+[rfc7866-9.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-9.1
+[rfc7866-9.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-9.2
+[rfc7866-12.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-12.1
+[rfc7866-12.2]: https://datatracker.ietf.org/doc/html/rfc7866#section-12.2
 
 ## Build
 

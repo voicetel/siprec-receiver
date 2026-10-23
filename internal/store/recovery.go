@@ -158,11 +158,14 @@ func (s *Store) RecoverOrphans(ctx context.Context, dir string) (int, error) {
 	return adopted, nil
 }
 
-// parseOrphanFilename splits a recorded WAV's name
-// ("<sanitised Call-ID>-<label>.wav") back into its parts. Sanitising
-// replaced "/" "\" ":" with "_" and "@" with "_at_"; only the "@"
-// mapping is safely reversible, so the recovered Call-ID is
-// best-effort (it still groups and displays correctly).
+// parseOrphanFilename names an orphan's call and leg from its file name.
+// The SRS now names WAVs with 24 random hex digits, which carry neither
+// (the Call-ID stays only in the database, so a path never echoes SIP
+// input): such a file becomes its own call, keyed by the name, with the
+// label "recovered". Files from before that change were
+// "<sanitised Call-ID>-<label>.wav", where "/" "\" ":" became "_" and
+// "@" became "_at_"; only "@" is reversible, so the Call-ID recovered
+// from those is best-effort (it still groups and displays correctly).
 func parseOrphanFilename(name string) (callID, label string) {
 	stem := strings.TrimSuffix(name, filepath.Ext(name))
 
