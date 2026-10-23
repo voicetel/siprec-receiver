@@ -230,15 +230,34 @@ type baseData struct {
 	Msg  string
 }
 
+// base is what every page template gets. A ?msg= is shown only when it
+// carries the signature redirectMsg gave it for this session: a crafted
+// link cannot make the UI (or the sign-in page, which never shows one)
+// display text of an attacker's choosing.
 func (s *Server) base(r *http.Request) baseData {
 	u := auth.CurrentUser(r)
 
-	d := baseData{User: u, Msg: r.URL.Query().Get("msg")}
+	d := baseData{User: u}
 	if u != nil {
 		d.CSRF = s.Auth.CSRFToken(u.Email, u.Exp)
+
+		q := r.URL.Query()
+		if msg := q.Get("msg"); msg != "" && s.Auth.ValidFlash(u.Email, u.Exp, msg, q.Get("ms")) {
+			d.Msg = msg
+		}
 	}
 
 	return d
+}
+
+// redirectMsg sends the browser to path, which shows msg once.
+func (s *Server) redirectMsg(w http.ResponseWriter, r *http.Request, path, msg string) {
+	q := url.Values{"msg": {msg}}
+	if u := auth.CurrentUser(r); u != nil {
+		q.Set("ms", s.Auth.FlashMAC(u.Email, u.Exp, msg))
+	}
+
+	http.Redirect(w, r, path+"?"+q.Encode(), http.StatusSeeOther)
 }
 
 func (s *Server) render(w http.ResponseWriter, name string, data any) {
@@ -524,7 +543,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[web] admin %q deleted call %d (%d file(s))", user.Email, id, len(paths)) // #nosec G706 -- quoted values
 	s.audit(r, "recording.delete", strconv.FormatInt(id, 10),
 		fmt.Sprintf("%d file(s) removed", len(paths)))
-	http.Redirect(w, r, "/recordings?msg=Recording+deleted", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/recordings", "Recording deleted")
 }
 
 // handleFetchRecord pulls the full Call record for this call from
@@ -550,7 +569,7 @@ func (s *Server) handleFetchRecord(w http.ResponseWriter, r *http.Request) {
 
 	detail := "/recordings/" + strconv.FormatInt(id, 10)
 	fail := func(msg string) {
-		http.Redirect(w, r, detail+"?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+		s.redirectMsg(w, r, detail, msg)
 	}
 
 	call, err := s.Store.GetCall(r.Context(), id)
@@ -652,7 +671,7 @@ func (s *Server) handleUserUpsert(w http.ResponseWriter, r *http.Request) {
 	role := r.FormValue("role")
 
 	if email == "" || !strings.Contains(email, "@") {
-		http.Redirect(w, r, "/admin/users?msg=Invalid+email+address", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "Invalid email address")
 
 		return
 	}
@@ -676,7 +695,7 @@ func (s *Server) handleUserUpsert(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[web] admin %q saved user %q role=%s", user.Email, email, role) // #nosec G706 -- quoted values
 	s.audit(r, "user.upsert", email, "role="+role)
-	http.Redirect(w, r, "/admin/users?msg=User+saved", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/users", "User saved")
 }
 
 func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
@@ -689,7 +708,7 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 	email := store.NormalizeEmail(r.FormValue("email"))
 	if email == s.Auth.AdminEmail() {
-		http.Redirect(w, r, "/admin/users?msg=The+bootstrap+administrator+comes+from+ADMIN_EMAIL+and+cannot+be+removed", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "The bootstrap administrator comes from ADMIN_EMAIL and cannot be removed")
 
 		return
 	}
@@ -703,7 +722,7 @@ func (s *Server) handleUserDelete(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[web] admin %q deleted user %q", user.Email, email) // #nosec G706 -- quoted values
 	s.audit(r, "user.delete", email, "")
-	http.Redirect(w, r, "/admin/users?msg=User+deleted", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/users", "User deleted")
 }
 
 func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
@@ -738,7 +757,7 @@ func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case row == nil:
-		http.Redirect(w, r, "/admin/users?msg=No+such+user", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "No such user")
 
 		return
 	}
@@ -752,7 +771,7 @@ func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[web] admin %q revoked sessions for %q", user.Email, email) // #nosec G706 -- quoted values
 	s.audit(r, "user.revoke_sessions", email, "")
-	http.Redirect(w, r, "/admin/users?msg=Sessions+revoked", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/users", "Sessions revoked")
 }
 
 // handleUserDisable disables a user (disabled=1) or enables them again
@@ -771,11 +790,11 @@ func (s *Server) handleUserDisable(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case email == s.Auth.AdminEmail():
-		http.Redirect(w, r, "/admin/users?msg=The+bootstrap+administrator+comes+from+ADMIN_EMAIL+and+cannot+be+disabled", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "The bootstrap administrator comes from ADMIN_EMAIL and cannot be disabled")
 
 		return
 	case disabled && email == store.NormalizeEmail(user.Email):
-		http.Redirect(w, r, "/admin/users?msg=You+cannot+disable+yourself", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "You cannot disable yourself")
 
 		return
 	}
@@ -789,19 +808,19 @@ func (s *Server) handleUserDisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !found {
-		http.Redirect(w, r, "/admin/users?msg=No+such+user", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/users", "No such user")
 
 		return
 	}
 
-	action, msg := "user.enable", "User+enabled"
+	action, msg := "user.enable", "User enabled"
 	if disabled {
-		action, msg = "user.disable", "User+disabled"
+		action, msg = "user.disable", "User disabled"
 	}
 
 	log.Printf("[web] admin %q set user %q disabled=%v", user.Email, email, disabled) // #nosec G706 -- quoted values
 	s.audit(r, action, email, "")
-	http.Redirect(w, r, "/admin/users?msg="+msg, http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/users", msg)
 }
 
 // --- Admin: audit log ---------------------------------------------------------
@@ -859,7 +878,7 @@ func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request)
 	apiKey := strings.TrimSpace(r.FormValue("api_key"))
 
 	if accountSid == "" || apiKey == "" {
-		http.Redirect(w, r, "/admin/integrations?msg=AccountSid+and+API+key+are+both+required", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/integrations", "AccountSid and API key are both required")
 
 		return
 	}
@@ -878,7 +897,7 @@ func (s *Server) handleIntegrationUpsert(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("[web] admin %q saved VoiceML key for account %q", user.Email, accountSid) // #nosec G706 -- quoted values
 	s.audit(r, "voicemlkey.save", accountSid, "")
-	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+saved", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/integrations", "VoiceML key saved")
 }
 
 func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request) {
@@ -900,7 +919,7 @@ func (s *Server) handleIntegrationDelete(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("[web] admin %q deleted VoiceML key for account %q", user.Email, accountSid) // #nosec G706 -- quoted values
 	s.audit(r, "voicemlkey.delete", accountSid, "")
-	http.Redirect(w, r, "/admin/integrations?msg=VoiceML+key+deleted", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/integrations", "VoiceML key deleted")
 }
 
 // --- Admin: retention & maintenance settings ---------------------------------
@@ -967,7 +986,7 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 
 	days, err := strconv.Atoi(strings.TrimSpace(r.FormValue("retention_days")))
 	if err != nil || days < 0 || days > 3650 {
-		http.Redirect(w, r, "/admin/settings?msg=Retention+days+must+be+a+whole+number+from+0+to+3650", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/settings", "Retention days must be a whole number from 0 to 3650")
 
 		return
 	}
@@ -981,7 +1000,7 @@ func (s *Server) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[web] admin %q set retention_days=%d", user.Email, days) // #nosec G706 -- quoted values
 	s.audit(r, "settings.retention", store.SettingRetentionDays, fmt.Sprintf("days=%d", days))
-	http.Redirect(w, r, "/admin/settings?msg=Retention+setting+saved", http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/settings", "Retention setting saved")
 }
 
 func (s *Server) handleSettingsPurge(w http.ResponseWriter, r *http.Request) {
@@ -1001,7 +1020,7 @@ func (s *Server) handleSettingsPurge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if days <= 0 {
-		http.Redirect(w, r, "/admin/settings?msg=Retention+is+disabled+%280+days%29%3B+nothing+was+purged", http.StatusSeeOther)
+		s.redirectMsg(w, r, "/admin/settings", "Retention is disabled (0 days); nothing was purged")
 
 		return
 	}
@@ -1020,5 +1039,5 @@ func (s *Server) handleSettingsPurge(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("manual days=%d calls=%d files=%d", days, calls, files))
 
 	msg := fmt.Sprintf("Purged %d expired call(s) and %d file(s)", calls, files)
-	http.Redirect(w, r, "/admin/settings?msg="+url.QueryEscape(msg), http.StatusSeeOther)
+	s.redirectMsg(w, r, "/admin/settings", msg)
 }

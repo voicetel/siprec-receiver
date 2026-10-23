@@ -497,7 +497,13 @@ paths:
         - name: msg
           in: query
           required: false
-          description: Flash message shown at the top of the page (set by form-post redirects).
+          description: Flash message shown at the top of the page, set by form-post redirects. Shown only together with a valid `ms`.
+          schema:
+            type: string
+        - name: ms
+          in: query
+          required: false
+          description: The session's signature of `msg`; a message without a valid one (a crafted link) is not shown.
           schema:
             type: string
       responses:

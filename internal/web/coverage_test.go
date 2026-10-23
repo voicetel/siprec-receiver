@@ -544,7 +544,7 @@ func TestCov_FetchRecordBranches(t *testing.T) {
 	wantRedirect(t, "no AccountSid", fetch(itoa(noAcct), ok), "no+AccountSid")
 
 	r := fetch(itoa(broken), ok)
-	wantRedirect(t, "upstream error", r, "/recordings/"+itoa(broken)+"?msg=Fetching+the+call+record+from+VoiceML+failed")
+	wantRedirect(t, "upstream error", r, "msg=Fetching+the+call+record+from+VoiceML+failed")
 
 	// Saving the fetched record fails; nothing upstream echoes back.
 	e.execSQL(t, `CREATE TRIGGER cov_no_update BEFORE UPDATE ON calls BEGIN SELECT RAISE(ABORT, 'read-only'); END`)

@@ -139,3 +139,31 @@ func TestAuditLogRecordsAdminActions(t *testing.T) {
 		}
 	}
 }
+
+// A ?msg= the server did not send this session is not shown: a crafted
+// link cannot put an attacker's text on the sign-in page or inside the
+// signed-in UI. The server's own messages, signed by redirectMsg, are.
+func TestPageMessagesMustBeSigned(t *testing.T) {
+	f := newFixture(t, adminEmail)
+	const bait = "Your account is locked, call +1 555 0100"
+
+	r := covGet(t, http.DefaultClient, f.srv.URL+"/login?msg="+url.QueryEscape(bait))
+	if strings.Contains(r.body, "account is locked") {
+		t.Error("sign-in page shows a crafted message")
+	}
+
+	admin := f.loginClient(t)
+
+	r = covGet(t, admin, f.srv.URL+"/recordings?msg="+url.QueryEscape(bait)+"&ms=00")
+	if r.status != http.StatusOK || strings.Contains(r.body, "account is locked") {
+		t.Errorf("recordings page shows a crafted message (%d)", r.status)
+	}
+
+	// The server's own message, reached by following its redirect, shows.
+	csrf := csrfFromPage(t, admin, f.srv.URL+"/admin/users")
+
+	r = covPost(t, admin, f.srv.URL+"/admin/users", url.Values{"email": {"new@example.com"}, "role": {"user"}, "csrf_token": {csrf}})
+	if !strings.Contains(r.body, "User saved") {
+		t.Errorf("own message not shown after the redirect:\n%s", r.body)
+	}
+}

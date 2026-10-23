@@ -183,3 +183,26 @@ func TestCSRFBoundToSession(t *testing.T) {
 		t.Error("empty CSRF token accepted")
 	}
 }
+
+// A page message signature binds the message to one session: another
+// user, another session, another message, or no signature fails.
+func TestFlashBoundToSessionAndMessage(t *testing.T) {
+	a, _ := testAuth(t, "")
+
+	sig := a.FlashMAC("Viewer@Example.com", 1700000000, "User saved")
+
+	if !a.ValidFlash("viewer@example.com", 1700000000, "User saved", sig) {
+		t.Fatal("own signature rejected")
+	}
+
+	for name, ok := range map[string]bool{
+		"other user":    a.ValidFlash("other@example.com", 1700000000, "User saved", sig),
+		"other session": a.ValidFlash("viewer@example.com", 1700003600, "User saved", sig),
+		"other message": a.ValidFlash("viewer@example.com", 1700000000, "Call +1 555 0100", sig),
+		"no signature":  a.ValidFlash("viewer@example.com", 1700000000, "User saved", ""),
+	} {
+		if ok {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

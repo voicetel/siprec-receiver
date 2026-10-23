@@ -647,6 +647,21 @@ func (a *Authenticator) CSRFToken(email string, exp int64) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// FlashMAC signs a page message for one session, so a page shows only
+// messages this server sent that user (see web's redirectMsg).
+func (a *Authenticator) FlashMAC(email string, exp int64, msg string) string {
+	mac := hmac.New(sha256.New, []byte(a.cfg.SessionSecret))
+	_, _ = fmt.Fprintf(mac, "flash:%s:%d:%s", store.NormalizeEmail(email), exp, msg)
+
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ValidFlash reports whether sig is FlashMAC's signature of msg for
+// the session.
+func (a *Authenticator) ValidFlash(email string, exp int64, msg, sig string) bool {
+	return sig != "" && hmac.Equal([]byte(sig), []byte(a.FlashMAC(email, exp, msg)))
+}
+
 // CheckCSRF validates the csrf_token form field of a POST request
 // for the session's user.
 func (a *Authenticator) CheckCSRF(r *http.Request, user *SessionUser) bool {
