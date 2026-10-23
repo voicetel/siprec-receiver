@@ -129,8 +129,8 @@ func (w *Writer) DurationSec() int {
 	return ceilSeconds(w.samples, int64(w.sampleRate*w.channels))
 }
 
-// Close finalises the WAV header (data + RIFF chunk sizes) and closes
-// the file. Safe to call multiple times.
+// Close finalises the WAV header (data + RIFF chunk sizes), syncs the
+// file to disk and closes it. Safe to call multiple times.
 func (w *Writer) Close() error {
 	if w.closed {
 		return nil
@@ -163,6 +163,15 @@ func (w *Writer) Close() error {
 		_ = w.f.Close()
 
 		return fmt.Errorf("wav write riff size: %w", err)
+	}
+
+	// Durable before the caller records the leg: a header patch lost to
+	// a power cut would leave a file the database knows (so recovery
+	// never repairs it) unplayable.
+	if err := w.f.Sync(); err != nil {
+		_ = w.f.Close()
+
+		return fmt.Errorf("wav sync: %w", err)
 	}
 
 	return w.f.Close()

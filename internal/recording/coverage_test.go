@@ -190,6 +190,21 @@ func TestCloseSeekError(t *testing.T) {
 	}
 }
 
+// The patched header is synced before Close reports success; a sync
+// failure is an error. /dev/null takes the seeks and writes but not an
+// fsync.
+func TestCloseSyncError(t *testing.T) {
+	f, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+	if err != nil {
+		t.Skipf("no /dev/null: %v", err)
+	}
+
+	w := &Writer{f: f, sampleRate: 8000, channels: 1}
+	if err := w.Close(); err == nil || !strings.Contains(err.Error(), "wav sync") {
+		t.Fatalf("Close err = %v, want sync error", err)
+	}
+}
+
 func TestDurationSecZeroParams(t *testing.T) {
 	if got := (&Writer{samples: 100}).DurationSec(); got != 0 {
 		t.Errorf("DurationSec = %d, want 0", got)
