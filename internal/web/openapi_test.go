@@ -52,7 +52,7 @@ func TestOpenAPISpecServedAndComplete(t *testing.T) {
 		"/", "/recordings", "/recordings/{id}",
 		"/recordings/{id}/legs/{legID}/audio",
 		"/recordings/{id}/fetch-record", "/recordings/{id}/delete",
-		"/admin/users", "/admin/users/delete", "/admin/users/revoke",
+		"/admin/users", "/admin/users/delete", "/admin/users/revoke", "/admin/users/disable",
 		"/admin/audit", "/admin/integrations", "/admin/integrations/delete",
 		"/admin/settings", "/admin/settings/purge",
 	}

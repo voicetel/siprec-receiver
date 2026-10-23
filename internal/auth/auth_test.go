@@ -51,9 +51,18 @@ func TestResolveRole(t *testing.T) {
 		t.Errorf("db user = %q, %v", role, ok)
 	}
 
-	_ = st.UpsertUser(ctx, store.User{Email: "viewer@example.com", Role: "user", Disabled: true})
+	if found, err := st.SetUserDisabled(ctx, "viewer@example.com", true); !found || err != nil {
+		t.Fatalf("SetUserDisabled = %v, %v", found, err)
+	}
+
 	if _, ok, _ := a.ResolveRole(ctx, "viewer@example.com"); ok {
 		t.Error("disabled user still authorized")
+	}
+
+	// Saving the user's role does not enable them.
+	_ = st.UpsertUser(ctx, store.User{Email: "viewer@example.com", Role: "admin"})
+	if _, ok, _ := a.ResolveRole(ctx, "viewer@example.com"); ok {
+		t.Error("a role change enabled a disabled user")
 	}
 }
 

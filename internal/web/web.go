@@ -181,6 +181,8 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserDelete)))
 	authed.Handle("POST /admin/users/revoke",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserRevoke)))
+	authed.Handle("POST /admin/users/disable",
+		s.Auth.RequireAdmin(http.HandlerFunc(s.handleUserDisable)))
 	authed.Handle("GET /admin/audit",
 		s.Auth.RequireAdmin(http.HandlerFunc(s.handleAudit)))
 	authed.Handle("GET /admin/integrations",
@@ -747,6 +749,55 @@ func (s *Server) handleUserRevoke(w http.ResponseWriter, r *http.Request) {
 	log.Printf("[web] admin %q revoked sessions for %q", user.Email, email) // #nosec G706 -- quoted values
 	s.audit(r, "user.revoke_sessions", email, "")
 	http.Redirect(w, r, "/admin/users?msg=Sessions+revoked", http.StatusSeeOther)
+}
+
+// handleUserDisable disables a user (disabled=1) or enables them again
+// (disabled=0). The bootstrap administrator comes from ADMIN_EMAIL and
+// an administrator cannot lock themselves out.
+func (s *Server) handleUserDisable(w http.ResponseWriter, r *http.Request) {
+	user := auth.CurrentUser(r)
+	if !s.Auth.CheckCSRF(r, user) {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+
+		return
+	}
+
+	email := store.NormalizeEmail(r.FormValue("email"))
+	disabled := r.FormValue("disabled") == "1"
+
+	switch {
+	case email == s.Auth.AdminEmail():
+		http.Redirect(w, r, "/admin/users?msg=The+bootstrap+administrator+comes+from+ADMIN_EMAIL+and+cannot+be+disabled", http.StatusSeeOther)
+
+		return
+	case disabled && email == store.NormalizeEmail(user.Email):
+		http.Redirect(w, r, "/admin/users?msg=You+cannot+disable+yourself", http.StatusSeeOther)
+
+		return
+	}
+
+	found, err := s.Store.SetUserDisabled(r.Context(), email, disabled)
+	if err != nil {
+		log.Printf("[web] set user %q disabled=%v: %v", email, disabled, err) // #nosec G706 -- quoted values
+		http.Error(w, "failed to save user", http.StatusInternalServerError)
+
+		return
+	}
+
+	if !found {
+		http.Redirect(w, r, "/admin/users?msg=No+such+user", http.StatusSeeOther)
+
+		return
+	}
+
+	action, msg := "user.enable", "User+enabled"
+	if disabled {
+		action, msg = "user.disable", "User+disabled"
+	}
+
+	log.Printf("[web] admin %q set user %q disabled=%v", user.Email, email, disabled) // #nosec G706 -- quoted values
+	s.audit(r, action, email, "")
+	http.Redirect(w, r, "/admin/users?msg="+msg, http.StatusSeeOther)
 }
 
 // --- Admin: audit log ---------------------------------------------------------

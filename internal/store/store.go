@@ -1009,7 +1009,9 @@ func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }
 
-// UpsertUser adds a user or updates an existing user's role/disabled.
+// UpsertUser adds a user, or changes an existing user's role. An
+// existing user's disabled flag is kept: only SetUserDisabled changes
+// it, so saving a disabled user's role does not let them back in.
 // A new row starts at a random session epoch: a user who is removed and
 // added again must not match the epoch a cookie from before carries
 // (with a fixed starting value, a revoked cookie came back to life).
@@ -1022,7 +1024,7 @@ func (s *Store) UpsertUser(ctx context.Context, u User) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO users (email, role, created_by, created_at, disabled, google_sub, session_epoch)
 VALUES (?, ?, ?, ?, ?, '', ?)
-ON CONFLICT(email) DO UPDATE SET role = excluded.role, disabled = excluded.disabled;`,
+ON CONFLICT(email) DO UPDATE SET role = excluded.role;`,
 		NormalizeEmail(u.Email), role, u.CreatedBy, millis(u.CreatedAt), boolInt(u.Disabled), randomEpoch())
 	if err != nil {
 		return fmt.Errorf("store: upsert user: %w", err)
@@ -1521,6 +1523,20 @@ func (s *Store) SetGoogleSubIfEmpty(ctx context.Context, email, sub string) (boo
 	n, err := res.RowsAffected()
 
 	return n > 0, err
+}
+
+// SetUserDisabled disables (or re-enables) a user row, reporting
+// whether one existed. A disabled user is refused on every request.
+func (s *Store) SetUserDisabled(ctx context.Context, email string, disabled bool) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET disabled = ? WHERE email = ?;`,
+		boolInt(disabled), NormalizeEmail(email))
+	if err != nil {
+		return false, fmt.Errorf("store: set user disabled: %w", err)
+	}
+
+	n, _ := res.RowsAffected()
+
+	return n > 0, nil
 }
 
 // BumpSessionEpoch revokes every outstanding session for a user:

@@ -467,6 +467,7 @@ is needed.
 | Delete a recording (row + WAV files) | ✅ | ❌ (403) |
 | Add/remove users, grant the admin role | ✅ | ❌ (403) |
 | Revoke a user's sessions (sign them out everywhere) | ✅ | ❌ (403) |
+| Disable or re-enable a user (a disabled user is refused until enabled; changing their role does not enable them) | ✅ | ❌ (403) |
 | Store/remove per-account VoiceML API keys | ✅ | ❌ (403) |
 | Configure retention and purge expired calls | ✅ | ❌ (403) |
 | View the audit log | ✅ | ❌ (403) |

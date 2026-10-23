@@ -4,7 +4,8 @@
 <p>The bootstrap administrator <strong>{{.AdminEmail}}</strong> comes from
 the <code>ADMIN_EMAIL</code> environment variable, always has the admin
 role, and cannot be removed here. Everyone else signs in with Google
-and must be listed below.</p>
+and must be listed below. A disabled user is refused until enabled
+again; changing their role does not enable them.</p>
 
 <table>
   <thead>
@@ -28,6 +29,12 @@ and must be listed below.</p>
           <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
           <input type="hidden" name="email" value="{{.Email}}">
           <button type="submit" title="Sign this user out everywhere">Revoke sessions</button>
+        </form>
+        <form method="post" action="/admin/users/disable" style="display:inline">
+          <input type="hidden" name="csrf_token" value="{{$.CSRF}}">
+          <input type="hidden" name="email" value="{{.Email}}">
+          <input type="hidden" name="disabled" value="{{if .Disabled}}0{{else}}1{{end}}">
+          <button type="submit">{{if .Disabled}}Enable{{else}}Disable{{end}}</button>
         </form>
         <form method="post" action="/admin/users/delete" style="display:inline"
           onsubmit="return confirm('Remove {{.Email}}?')">

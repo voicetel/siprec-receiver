@@ -754,6 +754,30 @@ paths:
               $ref: '#/components/headers/Location'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /admin/users/disable:
+    post:
+      tags:
+        - Admin
+      operationId: postAdminUserDisable
+      summary: Disable or enable a user (admin)
+      description: Disables a user (refused on every request until enabled again) or enables them. Changing a user's role never enables them. The bootstrap administrator cannot be disabled, nor can an administrator disable themselves. Writes an audit-log entry.
+      security:
+        - SessionCookie: []
+      requestBody:
+        required: true
+        description: The disable/enable form.
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: '#/components/schemas/UserDisableForm'
+      responses:
+        '303':
+          description: Saved (or refused, with a message); redirect back to the users page.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /admin/audit:
     get:
       tags:
@@ -1265,6 +1289,28 @@ components:
           format: email
           description: The target user's email.
           example: viewer@example.com
+        csrf_token:
+          $ref: '#/components/schemas/CSRFTokenField'
+    UserDisableForm:
+      type: object
+      description: The disable/enable-user form.
+      required:
+        - email
+        - disabled
+        - csrf_token
+      properties:
+        email:
+          type: string
+          format: email
+          description: The user to disable or enable.
+          example: viewer@example.com
+        disabled:
+          type: string
+          description: 1 disables the user, 0 enables them again.
+          enum:
+            - '0'
+            - '1'
+          example: '1'
         csrf_token:
           $ref: '#/components/schemas/CSRFTokenField'
     IntegrationUpsertForm:
