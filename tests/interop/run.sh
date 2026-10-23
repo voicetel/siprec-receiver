@@ -26,6 +26,7 @@ docker=${DOCKER:-docker}
 out=${OUT:-$(mktemp -d)}
 mkdir -p "$out/recordings"
 ip=$(hostname -I | awk '{print $1}')
+secret=interop-notify-secret
 
 if ! $docker image inspect "$tag" >/dev/null 2>&1; then
     echo "image '$tag' not found — build it first:" >&2
@@ -41,8 +42,8 @@ SIPREC_LISTEN=0.0.0.0:5070 SIPREC_NETWORKS=udp SIPREC_LOCAL_IP="$ip" \
 RTP_PORT_MIN=47000 RTP_PORT_MAX=47100 \
 RECORDING_DIR="$out/recordings" DB_PATH="$out/interop.db" \
 HTTP_LISTEN=127.0.0.1:18082 PUBLIC_BASE_URL=http://127.0.0.1:18082 \
-ADMIN_EMAIL=admin@example.com SESSION_SECRET=interop-session-secret-for-tests \
-NOTIFY_SECRET=interop-secret \
+ADMIN_EMAIL=admin@example.com DEV_AUTH_EMAIL=admin@example.com \
+SESSION_SECRET=interop-session-secret-for-tests NOTIFY_SECRET="$secret" \
     "$out/siprec-receiver" > "$out/receiver.log" 2>&1 &
 recv=$!
 trap 'kill "$recv" 2>/dev/null || true' EXIT
@@ -53,13 +54,13 @@ done
 
 # VoiceML-shaped callbacks can arrive before the recording is finalized.
 curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/amd \
-    -H 'Authorization: Bearer interop-secret' \
+    -H "Authorization: Bearer $secret" \
     --data 'CallSid=CA00112233445566778899aabbccddeeff&AccountSid=ACinterop&AnsweredBy=human&MachineDetectionDuration=1500'
 curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/disposition \
-    -H 'Authorization: Bearer interop-secret' \
+    -H "Authorization: Bearer $secret" \
     --data 'CallSid=CA00112233445566778899aabbccddeeff&AccountSid=ACinterop&CallStatus=completed&CallDuration=2&SequenceNumber=3'
 curl --fail --silent --show-error -X POST http://127.0.0.1:18082/api/notify/disposition \
-    -H 'Authorization: Bearer interop-secret' \
+    -H "Authorization: Bearer $secret" \
     --data 'CallSid=CA00112233445566778899aabbccddeeff&CallStatus=ringing&SequenceNumber=2'
 
 echo "==> running FreeSWITCH + mod_siprec scenarios in container"
@@ -68,7 +69,7 @@ $docker run --rm --network host --cap-add=SYS_NICE \
     "$tag" bash /interop/interop.sh
 
 echo "==> asserting on recordings"
-python3 "$here/check.py" "$out/interop.db" http://127.0.0.1:18082 interop-secret
+python3 "$here/check.py" "$out/interop.db" http://127.0.0.1:18082 "$secret" "$out"
 rc=$?
 echo "artifacts: $out (receiver.log, fs.log, interop.db, recordings/)"
 exit $rc

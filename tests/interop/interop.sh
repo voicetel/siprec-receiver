@@ -9,6 +9,12 @@
 #   stop      siprec <ad-hoc uri> -> 2 s -> siprec_stop -> 3 s -> hangup
 #   separate  separate-streams: recorded leg plays 1000 Hz, far end
 #             plays 440 Hz -> pause -> resume; two labelled streams
+#   long      siprec -> 12 s with no re-INVITE, under a 6 s profile RTP
+#             timeout: the SRS sends no RTP, so the recording leg must
+#             not be hung up with MEDIA_TIMEOUT
+# Then a hot-swap probe: replace mod_siprec.so (new inode, as an install
+# does), unload + load, and record whether FreeSWITCH still maps the
+# replaced file (hotswap.txt).
 set -uo pipefail
 PREFIX=/usr/local/freeswitch
 CONF=${PREFIX}/etc/freeswitch
@@ -24,6 +30,13 @@ echo "[interop] container/host IP: ${IP}"
 # so in-dialog requests between the local profiles stay local.
 sed -i -E "s#<X-PRE-PROCESS cmd=\"stun-set\" data=\"(external_(rtp|sip)_ip)=[^\"]*\"/>#<X-PRE-PROCESS cmd=\"set\" data=\"\\1=${IP}\"/>#" \
     "${CONF}/vars.xml"
+
+# The recording legs leave through the internal profile. A short RTP
+# timeout there proves the long call is not cut off for want of RTP from
+# the SRS.
+sed -i -E -e 's#<param name="rtp-timeout-sec" value="[0-9]+"/>#<param name="rtp-timeout-sec" value="6"/>#' \
+    -e 's#<param name="rtp-hold-timeout-sec" value="[0-9]+"/>#<param name="rtp-hold-timeout-sec" value="8"/>#' \
+    "${CONF}/sip_profiles/internal.xml"
 
 cat > "${CONF}/autoload_configs/siprec.conf.xml" <<EOF
 <configuration name="siprec.conf" description="siprec-receiver interop test">
@@ -90,6 +103,15 @@ cat > "${CONF}/dialplan/default/00_siprec_interop.xml" <<EOF
       <action application="hangup"/>
     </condition>
   </extension>
+  <extension name="siprec_live_long">
+    <condition field="destination_number" expression="^siprec_live_long\$">
+      <action application="answer"/>
+      <action application="sleep" data="500"/>
+      <action application="siprec" data="default"/>
+      <action application="sleep" data="12000"/>
+      <action application="hangup"/>
+    </condition>
+  </extension>
   <extension name="siprec_live_callsid">
     <condition field="destination_number" expression="^siprec_live_callsid\$">
       <action application="answer"/>
@@ -124,9 +146,10 @@ done
 LOGFILE="$("$CLI" -x "global_getvar log_dir" | tr -d '[:space:]')/freeswitch.log"
 "$CLI" -x "load mod_siprec"
 
-run_call() {
-    echo "[interop] scenario: $1 -> $2"
-    echo "[interop] originate: $("$CLI" -x "originate sofia/internal/siprec_tone@${IP}:5080 $2 XML default")"
+# wait_calls waits for every channel to end. The vanilla default
+# dialplan's [global] extension sleeps 10 s while default_password is
+# still 1234, so a fixed wait can cut a scenario off before it records.
+wait_calls() {
     for _ in $(seq 1 40); do
         sleep 1
         n=$("$CLI" -x "show channels count" | grep -oE '^[0-9]+' || echo 0)
@@ -135,12 +158,31 @@ run_call() {
     sleep 2
 }
 
+run_call() {
+    echo "[interop] scenario: $1 -> $2"
+    echo "[interop] originate: $("$CLI" -x "originate sofia/internal/siprec_tone@${IP}:5080 $2 XML default")"
+    wait_calls
+}
+
 run_call main siprec_live_main
 run_call stop siprec_live_stop
 run_call separate siprec_live_sep
+run_call long siprec_live_long
 echo "[interop] scenario: outbound CallSid channel"
 "$CLI" -x "originate {origination_uuid=CA00112233445566778899aabbccddeeff}sofia/internal/siprec_tone@${IP}:5080 siprec_live_callsid XML default"
-sleep 6
+wait_calls
+
+SO="${PREFIX}/lib/freeswitch/mod/mod_siprec.so"
+cp "$SO" "$SO.new" && mv -f "$SO.new" "$SO"
+"$CLI" -x "unload mod_siprec"
+sleep 1
+"$CLI" -x "load mod_siprec"
+if grep -q "mod_siprec.so (deleted)" "/proc/${FSPID}/maps"; then
+    echo "still-mapped" > "${OUT}/hotswap.txt"
+else
+    echo "unmapped" > "${OUT}/hotswap.txt"
+fi
+echo "[interop] hot-swap probe: $(cat "${OUT}/hotswap.txt")"
 
 "$CLI" -x "shutdown" >/dev/null 2>&1 || kill "$FSPID"
 wait "$FSPID" 2>/dev/null
