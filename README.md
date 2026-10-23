@@ -676,6 +676,11 @@ set `DOCKER="sudo docker"` if your user is not in the docker group.
 - Run one instance per FreeSWITCH node (or centrally, if
   `SIPREC_LOCAL_IP` is reachable from every FreeSWITCH): there is no
   cross-instance state, and recordings land on the local disk + SQLite.
+  Two processes never share a `RECORDING_DIR` or `DB_PATH`: each start
+  takes an exclusive lock (`RECORDING_DIR/.siprec-receiver.lock` and
+  `DB_PATH.lock`), and a second process (an overlapping blue/green
+  start, say) exits at startup instead of adopting WAVs the first is
+  still writing.
 - Configure recording retention under **Admin → Settings** (or set
   the initial `RETENTION_DAYS` default) — recordings otherwise
   accumulate forever. The application maintenance timer runs at

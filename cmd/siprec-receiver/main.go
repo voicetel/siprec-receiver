@@ -313,6 +313,15 @@ func main() {
 		}
 	}
 
+	// One process per recording directory and database: a second one's
+	// orphan recovery would adopt, and rewrite the headers of, WAVs the
+	// first is still writing.
+	release, err := lockInstance(filepath.Join(cfg.RecordingDir, instanceLockName), cfg.DBPath+".lock")
+	if err != nil {
+		log.Fatalf("[main] %v", err)
+	}
+	defer release()
+
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
 		log.Fatalf("[main] %v", err)
@@ -522,6 +531,42 @@ func maintenanceLoop(ctx context.Context, st *store.Store, envRetentionDays int)
 			run()
 		}
 	}
+}
+
+// instanceLockName is the lock file lockInstance holds in RECORDING_DIR.
+const instanceLockName = ".siprec-receiver.lock"
+
+// lockInstance takes an exclusive, non-blocking flock on every path,
+// creating the files, and returns the release. The kernel also drops
+// the locks when the process exits, however it exits.
+func lockInstance(paths ...string) (func(), error) {
+	var held []*os.File
+
+	release := func() {
+		for _, f := range held {
+			_ = f.Close()
+		}
+	}
+
+	for _, path := range paths {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- configured data directory
+		if err != nil {
+			release()
+
+			return nil, fmt.Errorf("instance lock: %w", err)
+		}
+
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil { // #nosec G115 -- a file descriptor fits an int
+			_ = f.Close()
+			release()
+
+			return nil, fmt.Errorf("instance lock %s: held by another siprec-receiver using the same directory (%w)", path, err)
+		}
+
+		held = append(held, f)
+	}
+
+	return release, nil
 }
 
 func ephemeralSecret() string {

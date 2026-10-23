@@ -658,13 +658,14 @@ func TestMainStopsOnSignal(t *testing.T) {
 	tmp := t.TempDir()
 	recDir := filepath.Join(tmp, "rec")
 
-	// An unreadable recording dir makes orphan recovery fail, which
-	// is logged and not fatal.
+	// An unlistable recording dir makes orphan recovery fail, which is
+	// logged and not fatal (files, the instance lock among them, can
+	// still be created in it).
 	if err := os.MkdirAll(recDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	if err := os.Chmod(recDir, 0o000); err != nil {
+	if err := os.Chmod(recDir, 0o300); err != nil {
 		t.Fatalf("chmod: %v", err)
 	}
 
@@ -730,6 +731,45 @@ func TestMainStopsOnSignal(t *testing.T) {
 
 	if _, err := http.Get("http://" + httpAddr + "/healthz"); err == nil {
 		t.Error("web server still answering after shutdown")
+	}
+}
+
+// A second process on the same recording directory or database is
+// refused while the first holds them; once released they can be taken.
+func TestLockInstance(t *testing.T) {
+	dir := t.TempDir()
+	rec, db := filepath.Join(dir, instanceLockName), filepath.Join(dir, "srs.db.lock")
+
+	release, err := lockInstance(rec, db)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+
+	for _, paths := range [][]string{{rec}, {filepath.Join(dir, "other.lock"), db}} {
+		if _, err := lockInstance(paths...); err == nil || !strings.Contains(err.Error(), "held by another siprec-receiver") {
+			t.Errorf("second lock on %v = %v, want refused", paths, err)
+		}
+	}
+
+	// The refused attempt released what it had taken.
+	other, err := lockInstance(filepath.Join(dir, "other.lock"))
+	if err != nil {
+		t.Errorf("other.lock left held by a refused attempt: %v", err)
+	} else {
+		other()
+	}
+
+	release()
+
+	again, err := lockInstance(rec, db)
+	if err != nil {
+		t.Fatalf("lock after release: %v", err)
+	}
+
+	again()
+
+	if _, err := lockInstance(filepath.Join(dir, "missing", "x.lock")); err == nil || !strings.Contains(err.Error(), "instance lock") {
+		t.Errorf("lock in a missing directory = %v", err)
 	}
 }
 
