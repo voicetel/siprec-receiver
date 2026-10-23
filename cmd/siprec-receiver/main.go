@@ -75,16 +75,23 @@ func envOr(key, def string) string {
 	return def
 }
 
-func envInt(key string, def int) int {
-	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+// envInts reads integer variables and remembers the first that does
+// not parse: a typo such as RETENTION_DAYS=30d must stop the start, not
+// quietly mean the default.
+type envInts struct{ err error }
 
-		log.Printf("[main] invalid %s=%q, using %d", key, v, def) // #nosec G706 -- env name/value, quoted
+func (e *envInts) get(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
 	}
 
-	return def
+	n, err := strconv.Atoi(v)
+	if err != nil && e.err == nil {
+		e.err = fmt.Errorf("%s=%q is not a whole number", key, v)
+	}
+
+	return n
 }
 
 // parseCIDRs parses a comma list of CIDRs (bare IPs become host
@@ -137,6 +144,8 @@ func loadConfig() (config, error) {
 		return config{}, err
 	}
 
+	var ints envInts
+
 	cfg := config{
 		SIPListen:      envOr("SIPREC_LISTEN", "127.0.0.1:5070"),
 		SIPNetworks:    networks,
@@ -146,8 +155,8 @@ func loadConfig() (config, error) {
 		SIPTLSCert:     os.Getenv("SIP_TLS_CERT"),
 		SIPTLSKey:      os.Getenv("SIP_TLS_KEY"),
 		AllowCIDRs:     cidrs,
-		RTPPortMin:     envInt("RTP_PORT_MIN", 41000),
-		RTPPortMax:     envInt("RTP_PORT_MAX", 42000),
+		RTPPortMin:     ints.get("RTP_PORT_MIN", 41000),
+		RTPPortMax:     ints.get("RTP_PORT_MAX", 42000),
 		RecordingDir:   envOr("RECORDING_DIR", "./data/recordings"),
 		DBPath:         envOr("DB_PATH", "./data/siprec-receiver.db"),
 		HTTPListen:     envOr("HTTP_LISTEN", "127.0.0.1:8080"),
@@ -160,10 +169,14 @@ func loadConfig() (config, error) {
 		AdminGoogleSub: strings.TrimSpace(os.Getenv("ADMIN_GOOGLE_SUB")),
 		NotifySecret:   os.Getenv("NOTIFY_SECRET"),
 		DevAuthEmail:   os.Getenv("DEV_AUTH_EMAIL"),
-		RetentionDays:  envInt("RETENTION_DAYS", 0),
+		RetentionDays:  ints.get("RETENTION_DAYS", 0),
 		VoiceMLBaseURL: os.Getenv("VOICEML_BASE_URL"),
-		MaxSessions:    envInt("SIPREC_MAX_SESSIONS", 256),
-		SessionIdle:    time.Duration(envInt("SIPREC_SESSION_IDLE_SEC", 300)) * time.Second,
+		MaxSessions:    ints.get("SIPREC_MAX_SESSIONS", 256),
+		SessionIdle:    time.Duration(ints.get("SIPREC_SESSION_IDLE_SEC", 300)) * time.Second,
+	}
+
+	if ints.err != nil {
+		return config{}, ints.err
 	}
 
 	return cfg, validateConfig(&cfg)
@@ -181,6 +194,16 @@ func validateConfig(cfg *config) error {
 		if n != "udp" && n != "tcp" {
 			return fmt.Errorf("SIPREC_NETWORKS entry %q is not udp or tcp", n)
 		}
+	}
+
+	// The answer carries it as c=IN IP4: the address the SRC sends RTP to.
+	if ip := net.ParseIP(cfg.SIPLocalIP); ip == nil || ip.To4() == nil || ip.IsUnspecified() {
+		return fmt.Errorf("SIPREC_LOCAL_IP %q must be an IPv4 address the SRC can send RTP to", cfg.SIPLocalIP)
+	}
+
+	if cfg.RTPPortMin < 1 || cfg.RTPPortMax > 65535 {
+		return fmt.Errorf("RTP_PORT_MIN..RTP_PORT_MAX (%d..%d) must lie within 1..65535",
+			cfg.RTPPortMin, cfg.RTPPortMax)
 	}
 
 	if cfg.RTPPortMin > cfg.RTPPortMax {
@@ -207,6 +230,10 @@ func validateConfig(cfg *config) error {
 		return fmt.Errorf("SESSION_SECRET is %d bytes; at least 32 are required", len(cfg.SessionSecret))
 	}
 
+	if err := validLimits(cfg); err != nil {
+		return err
+	}
+
 	if err := validVoiceMLBaseURL(cfg.VoiceMLBaseURL); err != nil {
 		return err
 	}
@@ -217,6 +244,44 @@ func validateConfig(cfg *config) error {
 	}
 
 	return nil
+}
+
+// minNotifySecret is the shortest NOTIFY_SECRET accepted.
+const minNotifySecret = 16
+
+// validLimits checks the numeric limits and the notify secret, which a
+// bad value would otherwise quietly turn into a default or a weak key.
+func validLimits(cfg *config) error {
+	switch {
+	case cfg.MaxSessions < 1:
+		return fmt.Errorf("SIPREC_MAX_SESSIONS must be at least 1, not %d", cfg.MaxSessions)
+	case cfg.SessionIdle < time.Second:
+		return fmt.Errorf("SIPREC_SESSION_IDLE_SEC must be at least 1, not %d", int(cfg.SessionIdle/time.Second))
+	case cfg.RetentionDays < 0:
+		return fmt.Errorf("RETENTION_DAYS must be 0 (keep forever) or more, not %d", cfg.RetentionDays)
+	case cfg.NotifySecret != "" && len(cfg.NotifySecret) < minNotifySecret:
+		return fmt.Errorf("NOTIFY_SECRET is %d bytes; at least %d are required", len(cfg.NotifySecret), minNotifySecret)
+	}
+
+	if !urlSafe(cfg.NotifySecret) {
+		log.Printf("[main] WARNING: NOTIFY_SECRET has characters outside A-Z a-z 0-9 - . _ ~; " +
+			"percent-encode it in a ?secret= URL (a bare \"+\" is accepted)")
+	}
+
+	return nil
+}
+
+// urlSafe reports whether s needs no percent-encoding in a URL query.
+func urlSafe(s string) bool {
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', strings.ContainsRune("-._~", c):
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 // validVoiceMLBaseURL accepts an empty VOICEML_BASE_URL (fetches off),

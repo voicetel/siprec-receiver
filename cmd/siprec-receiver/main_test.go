@@ -112,29 +112,31 @@ func TestEnvOr(t *testing.T) {
 	}
 }
 
-func TestEnvInt(t *testing.T) {
-	logs := captureLog(t)
+func TestEnvInts(t *testing.T) {
+	var ints envInts
 
 	t.Setenv("COV_ENV_INT", "")
 
-	if got := envInt("COV_ENV_INT", 7); got != 7 {
-		t.Errorf("unset = %d", got)
+	if got := ints.get("COV_ENV_INT", 7); got != 7 || ints.err != nil {
+		t.Errorf("unset = %d, %v", got, ints.err)
 	}
 
 	t.Setenv("COV_ENV_INT", " 42 ")
 
-	if got := envInt("COV_ENV_INT", 7); got != 42 {
-		t.Errorf("set = %d", got)
+	if got := ints.get("COV_ENV_INT", 7); got != 42 || ints.err != nil {
+		t.Errorf("set = %d, %v", got, ints.err)
 	}
 
-	t.Setenv("COV_ENV_INT", "4x")
+	// A value that does not parse is an error, never the default; the
+	// first one is reported.
+	t.Setenv("COV_ENV_INT", "30d")
+	t.Setenv("COV_ENV_INT2", "x")
 
-	if got := envInt("COV_ENV_INT", 7); got != 7 {
-		t.Errorf("invalid = %d", got)
-	}
+	ints.get("COV_ENV_INT", 7)
+	ints.get("COV_ENV_INT2", 7)
 
-	if !strings.Contains(logs.String(), `invalid COV_ENV_INT="4x", using 7`) {
-		t.Errorf("invalid value not logged: %q", logs.String())
+	if ints.err == nil || ints.err.Error() != `COV_ENV_INT="30d" is not a whole number` {
+		t.Errorf("err = %v", ints.err)
 	}
 }
 
@@ -209,7 +211,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		"GOOGLE_HOSTED_DOMAIN":    "example.com",
 		"SESSION_SECRET":          strings.Repeat("s", 32),
 		"ADMIN_EMAIL":             "admin@example.com",
-		"NOTIFY_SECRET":           "n",
+		"NOTIFY_SECRET":           "notify-secret-0123",
 		"DEV_AUTH_EMAIL":          "dev@example.com",
 		"RETENTION_DAYS":          "14",
 		"VOICEML_BASE_URL":        "https://vm.example.com",
@@ -233,7 +235,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		cfg.RecordingDir != "/rec" || cfg.DBPath != "/db/x.db" ||
 		cfg.HTTPListen != "localhost:9090" || cfg.PublicBaseURL != "https://srs.example.com" ||
 		cfg.GoogleID != "gid" || cfg.GoogleSecret != "gsecret" || cfg.HostedDomain != "example.com" ||
-		cfg.AdminEmail != "admin@example.com" || cfg.NotifySecret != "n" ||
+		cfg.AdminEmail != "admin@example.com" || cfg.NotifySecret != "notify-secret-0123" ||
 		cfg.DevAuthEmail != "dev@example.com" || cfg.RetentionDays != 14 ||
 		cfg.VoiceMLBaseURL != "https://vm.example.com" || cfg.MaxSessions != 8 ||
 		cfg.SessionIdle != time.Minute {
@@ -252,14 +254,23 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), `"sctp" is not udp or tcp`) {
 		t.Errorf("bad network error = %v", err)
 	}
+
+	t.Setenv("SIPREC_NETWORKS", "")
+	t.Setenv("RETENTION_DAYS", "30d")
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), `RETENTION_DAYS="30d" is not a whole number`) {
+		t.Errorf("bad integer error = %v", err)
+	}
 }
 
 func TestValidateConfig(t *testing.T) {
 	valid := func() config {
 		return config{
 			SIPNetworks: []string{"udp", "tcp"},
+			SIPLocalIP:  "127.0.0.1",
 			RTPPortMin:  41000, RTPPortMax: 42000,
-			HTTPListen: "127.0.0.1:8080",
+			HTTPListen:  "127.0.0.1:8080",
+			MaxSessions: 1, SessionIdle: time.Second,
 		}
 	}
 
@@ -281,6 +292,17 @@ func TestValidateConfig(t *testing.T) {
 			c.DevAuthEmail, c.HTTPListen = "d@example.com", "0.0.0.0:8080"
 		}, "DEV_AUTH_EMAIL is set but HTTP_LISTEN (0.0.0.0:8080) is not loopback"},
 		{"dev auth on loopback", func(c *config) { c.DevAuthEmail = "d@example.com" }, ""},
+		{"local IP not an IP", func(c *config) { c.SIPLocalIP = "srs.example.com" }, "SIPREC_LOCAL_IP"},
+		{"local IP IPv6", func(c *config) { c.SIPLocalIP = "2001:db8::1" }, "must be an IPv4 address"},
+		{"local IP unspecified", func(c *config) { c.SIPLocalIP = "0.0.0.0" }, "SIPREC_LOCAL_IP"},
+		{"RTP port 0", func(c *config) { c.RTPPortMin = 0 }, "within 1..65535"},
+		{"RTP port past 65535", func(c *config) { c.RTPPortMax = 70000 }, "within 1..65535"},
+		{"no sessions", func(c *config) { c.MaxSessions = 0 }, "SIPREC_MAX_SESSIONS must be at least 1"},
+		{"no idle time", func(c *config) { c.SessionIdle = 0 }, "SIPREC_SESSION_IDLE_SEC must be at least 1"},
+		{"negative retention", func(c *config) { c.RetentionDays = -1 }, "RETENTION_DAYS must be 0"},
+		{"short notify secret", func(c *config) { c.NotifySecret = "short" }, "NOTIFY_SECRET is 5 bytes; at least 16"},
+		{"notify secret", func(c *config) { c.NotifySecret = strings.Repeat("n", 16) }, ""},
+		{"plain http VoiceML", func(c *config) { c.VoiceMLBaseURL = "http://vm.example.com" }, "VOICEML_BASE_URL must use https"},
 	}
 
 	for _, tc := range cases {
@@ -307,6 +329,21 @@ func TestValidateConfig(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "RTP_PORT_MIN 41001 is odd; using 41002") {
 		t.Errorf("odd min adjustment not logged: %q", logs.String())
+	}
+
+	// A notify secret that needs percent-encoding in ?secret= is
+	// allowed, with a warning; a URL-safe one is not warned about.
+	cfg = valid()
+	cfg.NotifySecret = "abc-DEF_123.456~xyz"
+
+	if err := validateConfig(&cfg); err != nil || strings.Contains(logs.String(), "percent-encode") {
+		t.Errorf("URL-safe secret: %v, warned: %v", err, strings.Contains(logs.String(), "percent-encode"))
+	}
+
+	cfg.NotifySecret = "abc+def/ghi=jklmnop"
+
+	if err := validateConfig(&cfg); err != nil || !strings.Contains(logs.String(), "percent-encode it in a ?secret= URL") {
+		t.Errorf("secret needing encoding: %v, log %q", err, logs.String())
 	}
 }
 

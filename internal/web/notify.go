@@ -223,8 +223,7 @@ func notifyFailed(w http.ResponseWriter, kind, callSid, sipCallID string, err er
 }
 
 func (s *Server) notifyAuthorized(r *http.Request) bool {
-	querySecret := r.URL.Query().Get("secret")
-	if querySecret != "" && hmac.Equal([]byte(querySecret), []byte(s.NotifySecret)) {
+	if s.querySecret(r) {
 		// The query form exists for webhook senders that cannot set
 		// headers, but URLs land in proxy/access logs — say so once.
 		s.secretQueryWarn.Do(func() {
@@ -248,6 +247,27 @@ func (s *Server) notifyAuthorized(r *http.Request) bool {
 
 	for _, c := range candidates {
 		if c != "" && hmac.Equal([]byte(c), []byte(s.NotifySecret)) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// querySecret reports whether ?secret= carries the secret, decoded or
+// as typed: a "+" pasted into a callback URL unencoded decodes as a
+// space.
+func (s *Server) querySecret(r *http.Request) bool {
+	values := []string{r.URL.Query().Get("secret")}
+
+	for _, kv := range strings.Split(r.URL.RawQuery, "&") {
+		if raw, ok := strings.CutPrefix(kv, "secret="); ok {
+			values = append(values, raw)
+		}
+	}
+
+	for _, v := range values {
+		if v != "" && hmac.Equal([]byte(v), []byte(s.NotifySecret)) {
 			return true
 		}
 	}

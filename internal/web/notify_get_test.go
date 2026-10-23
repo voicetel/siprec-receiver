@@ -47,3 +47,22 @@ func TestNotifyAcceptsGETCallbacks(t *testing.T) {
 		covGet(t, http.DefaultClient, e.srv.URL+"/api/notify/amd?AnsweredBy=human&CallSid=CAx"),
 		http.StatusUnauthorized)
 }
+
+// A "+" in the secret, pasted into a callback URL unencoded, decodes as
+// a space; the secret as typed still authorizes.
+func TestQuerySecretWithAPlus(t *testing.T) {
+	const plus = "abc+def-0123456789"
+
+	e := newCovEnv(t, covOpts{notifySecret: plus})
+
+	r := covGet(t, http.DefaultClient, e.srv.URL+"/api/notify/amd?secret="+plus+"&AnsweredBy=human&CallSid=CAplus")
+	wantStatus(t, "raw plus", r, http.StatusOK)
+
+	r = covGet(t, http.DefaultClient, e.srv.URL+"/api/notify/amd?"+url.Values{
+		"secret": {plus}, "AnsweredBy": {"human"}, "CallSid": {"CAplus"},
+	}.Encode())
+	wantStatus(t, "encoded plus", r, http.StatusOK)
+
+	r = covGet(t, http.DefaultClient, e.srv.URL+"/api/notify/amd?secret=abc+def&AnsweredBy=human&CallSid=CAplus")
+	wantStatus(t, "wrong secret", r, http.StatusUnauthorized)
+}

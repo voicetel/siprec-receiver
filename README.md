@@ -111,19 +111,21 @@ logs a warning on startup while it is set.
 ## Configuration
 
 All configuration is environment variables (see also `.env.example`).
+A value that does not parse or is out of range stops the start with
+an error naming it; nothing silently falls back to a default.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SIPREC_LISTEN` | `127.0.0.1:5070` | SIP listen address for the SRS |
 | `SIPREC_NETWORKS` | `udp,tcp` | SIP transports to listen on (comma list) |
-| `SIPREC_LOCAL_IP` | `127.0.0.1` | IP advertised in SDP (`c=IN IP4`); must be reachable by the SRC's RTP fork |
+| `SIPREC_LOCAL_IP` | `127.0.0.1` | IPv4 address advertised in SDP (`c=IN IP4`); must be reachable by the SRC's RTP fork |
 | `SIPREC_RTP_BIND_IP` | `SIPREC_LOCAL_IP` | Local IPv4 UDP bind address. Set to a local interface or `0.0.0.0` when the advertised address is a public/NAT address not assigned locally |
 | `SIPREC_ALLOW_CIDRS` | — (any source) | Comma list of CIDRs/IPs allowed to send SIPREC INVITEs; sources outside get 403. Set this (or firewall equivalently) in production |
 | `SIPREC_MAX_SESSIONS` | `256` | Concurrent SIPREC sessions cap; further INVITEs get 503 |
 | `SIPREC_SESSION_IDLE_SEC` | `300` | Finalize a session after this many seconds with no SIP message and no RTP (lost BYE, crashed SRC) |
 | `SIP_TLS_LISTEN` | `127.0.0.1:5071` | TLS (SIPS) listen address, used only when cert+key are set |
 | `SIP_TLS_CERT` / `SIP_TLS_KEY` | — | PEM files enabling the SIPS listener (must be set together) |
-| `RTP_PORT_MIN` / `RTP_PORT_MAX` | `41000` / `42000` | UDP port pool for RTP receivers (even ports only, per RTP convention) |
+| `RTP_PORT_MIN` / `RTP_PORT_MAX` | `41000` / `42000` | UDP port pool for RTP receivers, within 1–65535 (even ports only, per RTP convention) |
 | `RECORDING_DIR` | `./data/recordings` | Where WAV files are written (`0600` files in a `0700` directory) |
 | `DB_PATH` | `./data/siprec-receiver.db` | SQLite database path (WAL mode, `0600`) |
 | `HTTP_LISTEN` | `127.0.0.1:8080` | Web UI + notify endpoint listen address |
@@ -133,7 +135,7 @@ All configuration is environment variables (see also `.env.example`).
 | `SESSION_SECRET` | ephemeral | HMAC secret for session cookies (at least 32 bytes when set); set a stable random value in production or every restart signs everyone out |
 | `ADMIN_EMAIL` | — | Bootstrap administrator email (always admin; managed via env, not the UI) |
 | `ADMIN_GOOGLE_SUB` | — | Pins the bootstrap administrator to one Google account ID (the `sub` claim), as a user's first sign-in pins any other user. Recommended unless `GOOGLE_HOSTED_DOMAIN` already restricts sign-in to your Workspace |
-| `NOTIFY_SECRET` | — (endpoint disabled) | Shared secret for `POST /api/notify/amd` |
+| `NOTIFY_SECRET` | — (endpoints disabled) | Shared secret for the notify endpoints, at least 16 bytes. Keep it to `A-Z a-z 0-9 - . _ ~` if it goes in a `?secret=` URL (a bare `+` is accepted as typed; anything else must be percent-encoded) |
 | `RETENTION_DAYS` | `0` (disabled) | Initial retention default. An administrator can override it under **Settings**; once saved there, the UI value wins and applies on the maintenance timer’s next run |
 | `VOICEML_BASE_URL` | — (fetches disabled) | Base URL of the VoiceML deployment for on-request Call-record fetches (per-account keys live in the UI, see Integrations). Must be `https://` (plain `http://` only to a loopback host): every fetch carries an API key |
 | `DEV_AUTH_EMAIL` | — | **Dev only:** bypass Google and sign in as this address |
