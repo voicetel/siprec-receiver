@@ -11,6 +11,7 @@ import (
 // the direction, and the SIPREC label.
 type MediaDescription struct {
 	Port         int    // remote RTP port (FS-side); 0 = declined stream
+	Proto        string // transport protocol on the m= line ("RTP/AVP"; "" = RTP/AVP)
 	PayloadType  int    // first RTP payload type on the m= line
 	PayloadTypes []int  // every payload type on the m= line, in offer order
 	CodecName    string // chosen supported codec: "PCMU" or "PCMA" ("" if none offered)
@@ -103,6 +104,7 @@ func ParseSDP(sdp string) (*ParsedSDP, error) {
 
 			out.Media = append(out.Media, MediaDescription{
 				Port:         port,
+				Proto:        parts[2],
 				PayloadType:  pts[0],
 				PayloadTypes: pts,
 			})
@@ -162,6 +164,56 @@ func chooseOfferedCodec(pts []int, rtpmap map[int]string) string {
 	}
 
 	return ""
+}
+
+// proto is the stream's transport protocol, answered as offered
+// (RFC 3264 §6).
+func (m MediaDescription) proto() string {
+	if m.Proto == "" {
+		return "RTP/AVP"
+	}
+
+	return m.Proto
+}
+
+// plainRTP reports whether the stream is unencrypted RTP. The SRS holds
+// no SRTP keys: recording RTP/SAVP (or DTLS-SRTP) would write
+// ciphertext as audio.
+func (m MediaDescription) plainRTP() bool {
+	return strings.EqualFold(m.proto(), "RTP/AVP") || strings.EqualFold(m.proto(), "RTP/AVPF")
+}
+
+// MediaWarning is a SIP Warning (RFC 3261 §20.43) explaining why an
+// offer is refused with 488.
+type MediaWarning struct {
+	Code int // 302 incompatible transport, 305 incompatible media format
+	Text string
+}
+
+// Header renders w as a Warning header value.
+func (w MediaWarning) Header() string {
+	return fmt.Sprintf("%d siprec-receiver %q", w.Code, w.Text)
+}
+
+// Unacceptable explains why the offer cannot be recorded, or is nil.
+// Every stream that is not declined (port 0) must be plain RTP carrying
+// PCMU or PCMA. One unrecordable stream refuses the whole offer: a
+// two-leg recording that silently loses a leg is worse than an SRC
+// told why.
+func (p *ParsedSDP) Unacceptable() *MediaWarning {
+	for i, m := range p.Media {
+		switch {
+		case m.Port == 0:
+		case !m.plainRTP():
+			return &MediaWarning{Code: 302, Text: fmt.Sprintf(
+				"Incompatible transport protocol on stream %d: this SRS records plain RTP/AVP only, not SRTP", i)}
+		case chooseAnswerPayload(m) < 0:
+			return &MediaWarning{Code: 305, Text: fmt.Sprintf(
+				"Incompatible media format on stream %d: this SRS records PCMU or PCMA only", i)}
+		}
+	}
+
+	return nil
 }
 
 // AllInactive reports whether every offered audio stream is a=inactive —
@@ -253,7 +305,7 @@ func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []in
 			if port == 0 && len(m.PayloadTypes) > 0 {
 				// Declined stream with no codec we support: echo
 				// the first offered PT on the port-0 line.
-				fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", m.PayloadTypes[0])
+				fmt.Fprintf(&b, "m=audio 0 %s %d\r\n", m.proto(), m.PayloadTypes[0])
 
 				continue
 			}
@@ -263,12 +315,12 @@ func BuildAnswerSDPWithVersion(localIP string, offer *ParsedSDP, localPorts []in
 		}
 
 		if port == 0 {
-			fmt.Fprintf(&b, "m=audio 0 RTP/AVP %d\r\n", pt)
+			fmt.Fprintf(&b, "m=audio 0 %s %d\r\n", m.proto(), pt)
 
 			continue
 		}
 
-		fmt.Fprintf(&b, "m=audio %d RTP/AVP %d\r\n", port, pt)
+		fmt.Fprintf(&b, "m=audio %d %s %d\r\n", port, m.proto(), pt)
 		fmt.Fprintf(&b, "a=rtpmap:%d %s/8000\r\n", pt, codecNameForPayload(pt))
 		// recvonly — we never send RTP back. RFC 7866-compliant
 		// SIPREC SRS answer: the SRC streams to us, we never

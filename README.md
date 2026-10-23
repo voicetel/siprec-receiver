@@ -62,7 +62,7 @@ endpoint, and the web UI are new in this repository.
 | G.711 PCMU / PCMA, 8 kHz | [RFC 3551](https://datatracker.ietf.org/doc/html/rfc3551) | ✅ The only offered codecs; WAV is 16-bit mono PCM at 8 kHz |
 | RTP loss accounting | [RFC 3550 §5.1][rfc3550] | ✅ Sequence-gap tracking in the receiver |
 | Transports | [RFC 7866 §11.3][rfc7866-11.3] | ✅ UDP + TCP; ✅ SIPS/TLS when `SIP_TLS_CERT`/`SIP_TLS_KEY` are set |
-| SRTP recording media | [RFC 7866 §11.2][rfc7866-11.2] | ❌ Not supported — answers are `RTP/AVP` only (matches mod_siprec, which cannot offer SDES) |
+| SRTP recording media | [RFC 7866 §11.2][rfc7866-11.2] | ❌ Not supported — an SRTP offer is refused with 488 + `Warning: 302` (mod_siprec cannot offer SDES) |
 | IPv6 | [RFC 4566 §5.7][rfc4566] | ❌ SDP answers advertise IPv4 (`c=IN IP4`); run the SRS on IPv4 |
 
 [rfc7866-6.1]: https://datatracker.ietf.org/doc/html/rfc7866#section-6.1
@@ -218,6 +218,12 @@ without needing the recording dialog's SIP Call-ID.
   Call-ID gets 400 and never creates a session. The same validation
   applies to BYE. Sources outside `SIPREC_ALLOW_CIDRS` get 403; more
   than 8 offered streams gets 488; at the session cap, 503.
+- **Unrecordable media:** an offer with any live stream that is not
+  plain RTP (`RTP/SAVP`, DTLS-SRTP: the SRS holds no keys and would
+  record ciphertext) or that carries neither PCMU nor PCMA is refused
+  with 488 and a `Warning` (302 or 305) before anything is allocated.
+  A re-INVITE or UPDATE refused this way leaves the recording as it
+  was. A declined (port 0) stream is never a reason to refuse.
 - **200 OK:** always plain `application/sdp` — one `m=audio` per offered
   stream with an SRS-pool port, the chosen G.711 payload type (the first
   offered PCMU/PCMA, dynamic payload types included; the answer always
@@ -704,7 +710,7 @@ WantedBy=multi-user.target
 | INVITE answered 500 `no rtp ports available` | Port pool exhausted — too many concurrent recordings or BYEs not arriving; widen `RTP_PORT_MIN/MAX` |
 | INVITE answered 403 | Source IP is outside `SIPREC_ALLOW_CIDRS` — add the FreeSWITCH host's CIDR |
 | INVITE answered 503 `session limit` | `SIPREC_MAX_SESSIONS` concurrent sessions reached (or a flood — check the source) |
-| INVITE answered 488 | More than 8 `m=audio` streams offered |
+| INVITE answered 488 | More than 8 `m=audio` streams offered, or the `Warning` header names the problem: SRTP offered (302) or no PCMU/PCMA (305) |
 | INVITE answered 400 `bad SDP` | SRC sent no SDP part, or a non-SIPREC INVITE reached the listener |
 | BYE/re-INVITE answered 481 | In-dialog request from a different From-tag or source IP than the INVITE — the dialog check rejected it; the recording is untouched |
 | Recording ends early; log says `reaping idle session` | No BYE arrived and no RTP flowed for `SIPREC_SESSION_IDLE_SEC` — the reaper finalized it (check the SRC/network for the lost BYE) |

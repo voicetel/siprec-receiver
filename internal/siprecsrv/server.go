@@ -857,6 +857,21 @@ func (s *Server) respondWithTag(req *sip.Request, tx sip.ServerTransaction, code
 	_ = tx.Respond(resp)
 }
 
+// refuseMedia answers 488 with a Warning when the offer cannot be
+// recorded, and reports whether it did.
+func (s *Server) refuseMedia(req *sip.Request, tx sip.ServerTransaction, callID string, offer *ParsedSDP) bool {
+	w := offer.Unacceptable()
+	if w == nil {
+		return false
+	}
+
+	log.Printf("[siprecsrv] %q: refusing the offer: %s", callID, w.Text)
+	s.respondWithTag(req, tx, sip.StatusNotAcceptableHere, "Not Acceptable Here", nil, "", "",
+		sip.NewHeader("Warning", w.Header()))
+
+	return true
+}
+
 func (s *Server) onOptions(req *sip.Request, tx sip.ServerTransaction) {
 	resp := sip.NewResponseFromRequest(req, sip.StatusOK, "OK", nil)
 	resp.AppendHeader(sip.NewHeader("Allow", allowedMethods))
@@ -1030,6 +1045,12 @@ func (s *Server) onInvite(req *sip.Request, tx sip.ServerTransaction) {
 		log.Printf("[siprecsrv] %q: %d offered streams exceeds cap %d", callID, len(parsed.Media), maxStreamsPerInvite)
 		s.respond(req, tx, sip.StatusNotAcceptableHere, "too many streams", nil, "")
 
+		return
+	}
+
+	// Refused before anything is allocated. On a re-INVITE the 488
+	// leaves the session as it was (RFC 3261 §14.2).
+	if s.refuseMedia(req, tx, callID, parsed) {
 		return
 	}
 
@@ -1449,6 +1470,10 @@ func (s *Server) onUpdate(req *sip.Request, tx sip.ServerTransaction) {
 		if parsed, err = ParseSDP(sdp); err != nil {
 			s.respond(req, tx, sip.StatusBadRequest, "bad SDP", nil, "")
 
+			return
+		}
+
+		if s.refuseMedia(req, tx, callID, parsed) {
 			return
 		}
 	}

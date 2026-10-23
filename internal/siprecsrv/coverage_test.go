@@ -753,12 +753,13 @@ func TestCov_InviteResourceFailures(t *testing.T) {
 		tx := newRecordingTx()
 		srv.onInvite(covRequest(sip.INVITE, "cov-opus", covFrom, "", opus, "application/sdp"), tx)
 
-		if res := tx.only(t); res.StatusCode != sip.StatusInternalServerError || res.Reason != "sdp build failed" {
-			t.Errorf("INVITE = %d %s, want 500 sdp build failed", res.StatusCode, res.Reason)
+		res := tx.only(t)
+		if res.StatusCode != sip.StatusNotAcceptableHere || !strings.HasPrefix(header(res, "Warning"), "305 ") {
+			t.Errorf("INVITE = %d %s, Warning %q, want 488 with Warning 305", res.StatusCode, res.Reason, header(res, "Warning"))
 		}
 
 		if pool.Available() != 3 || srv.covSession("cov-opus") != nil {
-			t.Error("rollback leaked a port or a session")
+			t.Error("the refused INVITE allocated a port or a session")
 		}
 	})
 }
