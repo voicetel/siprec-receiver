@@ -1,0 +1,73 @@
+name: Security Scan
+
+# Static security scanning on push/PR — runs on GitHub-hosted ubuntu
+# runners. Two parallel jobs:
+#
+#   gosec        — Go AST security scan (hardcoded creds, file perms,
+#                  SQL injection, weak crypto, etc.). SARIF artifact
+#                  uploaded for review; non-fatal. gosec's G115
+#                  (integer-overflow conversion) is industry-noisy
+#                  on codec / time / size codepaths so SARIF is
+#                  treated as advisory — review each new HIGH finding
+#                  rather than blocking CI.
+#   govulncheck  — known-CVE scan against the Go vulnerability DB,
+#                  symbol-pruned to packages this module actually
+#                  reaches. CI fails on any reachable vulnerability —
+#                  this layer is high-signal; Dependabot bumps
+#                  resolve hits in normal course.
+#
+# The only cgo dependency (mattn/go-sqlite3) bundles the SQLite
+# amalgamation and needs nothing beyond the runner's stock gcc.
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gosec:
+    name: gosec
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install gosec
+        run: go install github.com/securego/gosec/v2/cmd/gosec@latest
+
+      - name: Run gosec (SARIF output)
+        run: gosec -fmt=sarif -out=gosec.sarif -no-fail -exclude-dir=vendor ./...
+
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gosec-sarif
+          path: gosec.sarif
+          if-no-files-found: warn
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
