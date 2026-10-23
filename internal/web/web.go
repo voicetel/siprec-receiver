@@ -504,18 +504,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The store removes the WAV files with the rows: a file it cannot
+	// remove keeps the whole call, rather than leaving the file to come
+	// back as a recovered orphan.
 	paths, err := s.Store.DeleteCall(r.Context(), id)
 	if err != nil {
 		log.Printf("[web] delete call %d: %v", id, err)
 		http.Error(w, "failed to delete recording", http.StatusInternalServerError)
 
 		return
-	}
-
-	for _, p := range paths {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			log.Printf("[web] delete call %d: remove %s: %v", id, p, err)
-		}
 	}
 
 	log.Printf("[web] admin %q deleted call %d (%d file(s))", user.Email, id, len(paths)) // #nosec G706 -- quoted values

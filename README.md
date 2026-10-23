@@ -682,7 +682,12 @@ set `DOCKER="sudo docker"` if your user is not in the docker group.
   retention period, checkpoints the SQLite WAL, runs
   `PRAGMA optimize`, and vacuums when free pages exceed 20%. The
   settings page shows the last purge and database size and offers a
-  manual purge. Audit-log entries are not retention-purged.
+  manual purge. Audit-log entries are not retention-purged. A call
+  (deleted by an administrator or purged) goes together with its WAV
+  files: if a file cannot be removed the call is kept, whole, and the
+  delete answers an error (the purge retries it on its next run). A
+  file left behind without its row would otherwise come back as a
+  recovered orphan at the next start.
 - A `Dockerfile` is included (`docker build -t siprec-receiver .`);
   mount a volume at `/data` for the database + recordings. Container
   networking caveat: the SDP answer advertises `SIPREC_LOCAL_IP`, so

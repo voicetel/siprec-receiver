@@ -87,9 +87,10 @@ func TestRecoverOrphans_AdoptsCrashedRecording(t *testing.T) {
 	}
 }
 
-func TestDeleteCallsStartedBefore(t *testing.T) {
+func TestPurgeExpiredDeletesOnlyOldCalls(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
+	dir := t.TempDir()
 
 	old := time.Now().AddDate(0, 0, -40)
 	recent := time.Now()
@@ -100,21 +101,29 @@ func TestDeleteCallsStartedBefore(t *testing.T) {
 	}{
 		{"old-1", old}, {"new-1", recent},
 	} {
+		wav := filepath.Join(dir, tc.callID+".wav")
+		if err := os.WriteFile(wav, []byte("RIFF"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
 		if err := s.RecordLeg(ctx, siprecsrv.FinalizedLeg{
-			CallID: tc.callID, WAVPath: "/rec/" + tc.callID + ".wav",
-			DurationSec: 1, StartedAt: tc.started,
+			CallID: tc.callID, WAVPath: wav, DurationSec: 1, StartedAt: tc.started,
 		}); err != nil {
 			t.Fatalf("RecordLeg %s: %v", tc.callID, err)
 		}
 	}
 
-	paths, n, err := s.DeleteCallsStartedBefore(ctx, time.Now().AddDate(0, 0, -30))
-	if err != nil {
-		t.Fatalf("DeleteCallsStartedBefore: %v", err)
+	calls, files, err := s.PurgeExpired(ctx, 30)
+	if err != nil || calls != 1 || files != 1 {
+		t.Fatalf("PurgeExpired = %d calls %d files, %v; want 1 and 1", calls, files, err)
 	}
 
-	if n != 1 || len(paths) != 1 || paths[0] != "/rec/old-1.wav" {
-		t.Fatalf("deleted n=%d paths=%v, want 1 / [/rec/old-1.wav]", n, paths)
+	if _, err := os.Stat(filepath.Join(dir, "old-1.wav")); !os.IsNotExist(err) {
+		t.Errorf("expired WAV still on disk: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "new-1.wav")); err != nil {
+		t.Errorf("recent WAV removed: %v", err)
 	}
 
 	if _, total, _ := s.ListCalls(ctx, ListFilter{}); total != 1 {

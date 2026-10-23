@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -931,25 +933,68 @@ func (s *Store) GetLeg(ctx context.Context, id int64) (*Leg, error) {
 	return &l, nil
 }
 
-// DeleteCall removes a call and its legs, returning the legs' WAV
-// paths so the caller can remove the files.
+// DeleteCall removes a call, its legs and their WAV files as one
+// change: the rows go only once every file is gone (or already was), so
+// a file that cannot be removed never outlives its row and comes back
+// at the next start as a recovered orphan. It returns the legs' paths,
+// or (nil, nil) when the call does not exist.
 func (s *Store) DeleteCall(ctx context.Context, id int64) ([]string, error) {
-	call, err := s.GetCall(ctx, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("store: delete call %d begin: %w", id, err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	paths, err := legPaths(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	if call == nil {
+	res, err := tx.ExecContext(ctx, `DELETE FROM calls WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("store: delete call %d: %w", id, err)
+	}
+
+	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, nil
 	}
 
-	paths := make([]string, 0, len(call.Legs))
-	for _, l := range call.Legs {
-		paths = append(paths, l.WAVPath)
+	for _, p := range paths {
+		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("store: delete call %d: %w", id, err)
+		}
 	}
 
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM calls WHERE id = ?`, id); err != nil {
-		return nil, fmt.Errorf("store: delete call %d: %w", id, err)
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: delete call %d commit: %w", id, err)
+	}
+
+	return paths, nil
+}
+
+// legPaths lists the WAV paths of a call's legs.
+func legPaths(ctx context.Context, tx *sql.Tx, callID int64) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT wav_path FROM legs WHERE call_id = ? ORDER BY id`, callID)
+	if err != nil {
+		return nil, fmt.Errorf("store: leg paths of call %d: %w", callID, err)
+	}
+
+	defer func() { _ = rows.Close() }()
+
+	paths := []string{}
+
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("store: scan leg path: %w", err)
+		}
+
+		paths = append(paths, p)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: leg paths rows: %w", err)
 	}
 
 	return paths, nil

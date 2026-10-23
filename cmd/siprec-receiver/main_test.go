@@ -455,8 +455,8 @@ func TestMaintenanceLoopPurgeError(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 
-	if _, err := db.Exec(`ALTER TABLE legs RENAME TO cov_legs`); err != nil {
-		t.Fatalf("rename legs: %v", err)
+	if _, err := db.Exec(`ALTER TABLE calls RENAME TO cov_calls`); err != nil {
+		t.Fatalf("rename calls: %v", err)
 	}
 
 	_ = db.Close()

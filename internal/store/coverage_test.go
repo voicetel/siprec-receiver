@@ -162,7 +162,7 @@ func TestClosedStore_EveryMethodReportsError(t *testing.T) {
 
 			return err
 		}, "get setting"},
-		{"PurgeExpired", func() error { _, _, err := s.PurgeExpired(ctx, 30); return err }, "retention select paths"},
+		{"PurgeExpired", func() error { _, _, err := s.PurgeExpired(ctx, 30); return err }, "retention select"},
 		{"DBStats", func() error { _, err := s.DBStats(ctx); return err }, "db stats"},
 		{"Checkpoint", func() error { return s.Checkpoint(ctx) }, "wal checkpoint"},
 		{"Optimize", func() error { return s.Optimize(ctx) }, "optimize"},
@@ -170,12 +170,8 @@ func TestClosedStore_EveryMethodReportsError(t *testing.T) {
 		{"KnownWAVPaths", func() error { _, err := s.KnownWAVPaths(ctx); return err }, "known wav paths"},
 		{"AdoptOrphan", func() error {
 			return s.AdoptOrphan(ctx, "dlg", "x", "/rec/x.wav", time.Now(), 1)
-		}, "adopt orphan call"},
+		}, "adopt orphan begin"},
 		{"RecoverOrphans", func() error { _, err := s.RecoverOrphans(ctx, t.TempDir()); return err }, "known wav paths"},
-		{"DeleteCallsStartedBefore", func() error {
-			_, _, err := s.DeleteCallsStartedBefore(ctx, time.Now())
-			return err
-		}, "retention select paths"},
 		{"columnExists", func() error { _, err := s.columnExists(ctx, "calls", "id"); return err }, "pragma calls"},
 		{"migrate", func() error { return s.migrate(ctx) }, "legacy table check"},
 		{"RecordLeg", func() error { return s.RecordLeg(ctx, leg) }, "record leg begin"},
@@ -188,7 +184,7 @@ func TestClosedStore_EveryMethodReportsError(t *testing.T) {
 		{"ListCalls", func() error { _, _, err := s.ListCalls(ctx, ListFilter{}); return err }, "count calls"},
 		{"GetCall", func() error { _, err := s.GetCall(ctx, 1); return err }, "scan call"},
 		{"GetLeg", func() error { _, err := s.GetLeg(ctx, 1); return err }, "get leg"},
-		{"DeleteCall", func() error { _, err := s.DeleteCall(ctx, 1); return err }, "scan call"},
+		{"DeleteCall", func() error { _, err := s.DeleteCall(ctx, 1); return err }, "delete call 1 begin"},
 		{"UpsertUser", func() error { return s.UpsertUser(ctx, User{Email: "a@b.c"}) }, "upsert user"},
 		{"GetUser", func() error { _, err := s.GetUser(ctx, "a@b.c"); return err }, "get user"},
 		{"ListUsers", func() error { _, err := s.ListUsers(ctx); return err }, "list users"},
@@ -1025,6 +1021,21 @@ func TestAdoptOrphan_AlreadyAdoptedAndLegFailure(t *testing.T) {
 	mustExec(t, s, `CREATE TRIGGER block_leg_insert BEFORE INSERT ON legs
 		BEGIN SELECT RAISE(ABORT, 'leg insert blocked'); END`)
 	wantErr(t, s.AdoptOrphan(ctx, "dlg-new", "x", "/rec/new.wav", time.Now(), 3), "adopt orphan leg")
+
+	// Both rows or neither: the failed leg leaves no legless call
+	// behind (which would keep the file unadopted forever).
+	if n := countCalls(t, s); n != 1 {
+		t.Errorf("%d calls after the failed adoption, want only the existing one", n)
+	}
+
+	mustExec(t, s, `DROP TRIGGER block_leg_insert`)
+	mustExec(t, s, `CREATE TRIGGER block_call_insert BEFORE INSERT ON calls
+		BEGIN SELECT RAISE(ABORT, 'call insert blocked'); END`)
+	wantErr(t, s.AdoptOrphan(ctx, "dlg-new", "x", "/rec/new.wav", time.Now(), 3), "adopt orphan call")
+
+	mustExec(t, s, `DROP TRIGGER block_call_insert`)
+	failCommits(t, s)
+	wantErr(t, s.AdoptOrphan(ctx, "dlg-new", "x", "/rec/new.wav", time.Now(), 3), "adopt orphan commit")
 }
 
 func TestRecoverOrphans_SkipsAndFailures(t *testing.T) {
@@ -1073,44 +1084,52 @@ func TestParseOrphanFilename_NoLabel(t *testing.T) {
 	}
 }
 
-func TestDeleteCallsStartedBefore_Failures(t *testing.T) {
+func TestExpiredCallIDs_Failures(t *testing.T) {
 	ctx := context.Background()
 	old := time.Now().AddDate(0, 0, -10)
 
 	t.Run("scan", func(t *testing.T) {
 		s := openTestStore(t)
 		recordSimpleLeg(t, s, "dlg-old", old)
-		mustExec(t, s, `DROP TABLE legs`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT id AS call_id, NULL AS wav_path FROM calls`)
+		mustExec(t, s, `ALTER TABLE calls RENAME TO calls_real`)
+		mustExec(t, s, `CREATE VIEW calls AS SELECT 'x' AS id, started_at FROM calls_real`)
 
-		_, _, err := s.DeleteCallsStartedBefore(ctx, time.Now())
-		wantErr(t, err, "retention scan path")
+		_, err := s.expiredCallIDs(ctx, time.Now())
+		wantErr(t, err, "retention scan")
 	})
 
 	t.Run("rows", func(t *testing.T) {
 		s := openTestStore(t)
 		recordSimpleLeg(t, s, "dlg-old", old)
 		addBoom(t, s)
-		mustExec(t, s, `DROP TABLE legs`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT calls.id AS call_id, abs(boom.x) AS wav_path FROM calls, boom`)
+		mustExec(t, s, `ALTER TABLE calls RENAME TO calls_real`)
+		mustExec(t, s, `CREATE VIEW calls AS SELECT abs(boom.x) AS id, started_at FROM calls_real, boom`)
 
-		_, _, err := s.DeleteCallsStartedBefore(ctx, time.Now())
-		wantErr(t, err, "retention paths rows")
+		_, err := s.expiredCallIDs(ctx, time.Now())
+		wantErr(t, err, "retention rows")
 	})
+}
 
-	t.Run("delete", func(t *testing.T) {
-		s := openTestStore(t)
-		recordSimpleLeg(t, s, "dlg-old", old)
-		mustExec(t, s, `CREATE TRIGGER block_call_delete BEFORE DELETE ON calls
-			BEGIN SELECT RAISE(ABORT, 'call delete blocked'); END`)
+// A call the purge cannot delete is kept, whole, for the next run; the
+// rest of the run goes on.
+func TestPurgeExpired_KeepsACallItCannotDelete(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	old := time.Now().AddDate(0, 0, -10)
 
-		_, _, err := s.DeleteCallsStartedBefore(ctx, time.Now())
-		wantErr(t, err, "retention delete")
+	stuck := recordSimpleLeg(t, s, "dlg-stuck", old)
+	recordSimpleLeg(t, s, "dlg-gone", old)
+	mustExec(t, s, `CREATE TRIGGER block_stuck BEFORE DELETE ON calls WHEN old.id = `+fmt.Sprint(stuck)+`
+		BEGIN SELECT RAISE(ABORT, 'call delete blocked'); END`)
 
-		if _, total, _ := s.ListCalls(ctx, ListFilter{}); total != 1 {
-			t.Errorf("calls after failed delete = %d, want 1", total)
-		}
-	})
+	calls, files, err := s.PurgeExpired(ctx, 1)
+	if err != nil || calls != 1 || files != 1 {
+		t.Fatalf("PurgeExpired = %d calls %d files, %v; want 1 and 1", calls, files, err)
+	}
+
+	if c, _ := s.GetCall(ctx, stuck); c == nil || len(c.Legs) != 1 {
+		t.Errorf("the undeletable call lost rows: %+v", c)
+	}
 }
 
 func TestSettings_AbsentAndNegativeRetention(t *testing.T) {

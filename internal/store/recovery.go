@@ -46,14 +46,21 @@ func (s *Store) KnownWAVPaths(ctx context.Context) (map[string]bool, error) {
 }
 
 // AdoptOrphan inserts a completed call + single leg for a WAV file
-// recovered from disk (see RecoverOrphans). sipCallID is the best
-// available correlation key (the de-sanitised file stem); direction is
+// recovered from disk (see RecoverOrphans), both or neither. sipCallID
+// is the best available correlation key (the file stem); direction is
 // marked "recovered-orphan" so the UI can tell these apart.
 func (s *Store) AdoptOrphan(ctx context.Context, sipCallID, label, wavPath string, startedAt time.Time, durationSec int) error {
 	now := time.Now().UTC()
 	endedAt := startedAt.Add(time.Duration(durationSec) * time.Second)
 
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: adopt orphan begin: %w", err)
+	}
+
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 INSERT INTO calls (sip_call_id, direction, started_at, ended_at, duration_sec,
 	status, created_at, updated_at)
 VALUES (?, 'recovered-orphan', ?, ?, ?, 'completed', ?, ?)
@@ -72,13 +79,17 @@ ON CONFLICT(sip_call_id) DO NOTHING;`,
 		return fmt.Errorf("store: adopt orphan id: %w", err)
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO legs (call_id, label, wav_path, duration_sec, created_at)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(call_id, wav_path) DO NOTHING;`,
 		callPK, label, wavPath, durationSec, millis(now))
 	if err != nil {
 		return fmt.Errorf("store: adopt orphan leg: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: adopt orphan commit: %w", err)
 	}
 
 	return nil
@@ -167,50 +178,32 @@ func parseOrphanFilename(name string) (callID, label string) {
 	return callID, label
 }
 
-// DeleteCallsStartedBefore removes every call whose started_at is
-// older than cutoff (the RETENTION_DAYS sweep), returning the WAV
-// paths of their legs so the caller can remove the files. AMD-only
-// rows age out by their notification time, which is their started_at.
-func (s *Store) DeleteCallsStartedBefore(ctx context.Context, cutoff time.Time) ([]string, int, error) {
-	cut := millis(cutoff)
-
-	rows, err := s.db.QueryContext(ctx, `
-SELECT legs.wav_path FROM legs
-JOIN calls ON calls.id = legs.call_id
-WHERE calls.started_at > 0 AND calls.started_at < ?`, cut)
+// expiredCallIDs lists the calls that started before cutoff (the
+// RETENTION_DAYS sweep). AMD-only rows age out by their notification
+// time, which is their started_at; a row with no start never expires.
+func (s *Store) expiredCallIDs(ctx context.Context, cutoff time.Time) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM calls WHERE started_at > 0 AND started_at < ? ORDER BY id`, millis(cutoff))
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: retention select paths: %w", err)
+		return nil, fmt.Errorf("store: retention select: %w", err)
 	}
 
-	var paths []string
+	defer func() { _ = rows.Close() }()
+
+	var ids []int64
 
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
-			_ = rows.Close()
-
-			return nil, 0, fmt.Errorf("store: retention scan path: %w", err)
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: retention scan: %w", err)
 		}
 
-		paths = append(paths, p)
+		ids = append(ids, id)
 	}
-
-	_ = rows.Close()
 
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("store: retention paths rows: %w", err)
+		return nil, fmt.Errorf("store: retention rows: %w", err)
 	}
 
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM calls WHERE started_at > 0 AND started_at < ?`, cut)
-	if err != nil {
-		return nil, 0, fmt.Errorf("store: retention delete: %w", err)
-	}
-
-	n, err := res.RowsAffected()
-	if err != nil {
-		return nil, 0, fmt.Errorf("store: retention count: %w", err)
-	}
-
-	return paths, int(n), nil
+	return ids, nil
 }

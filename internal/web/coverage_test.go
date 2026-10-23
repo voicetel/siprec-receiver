@@ -455,8 +455,9 @@ func TestCov_Delete(t *testing.T) {
 	logs := captureLog(t)
 	admin, csrf := e.adminSession(t)
 
-	// A leg "file" that is a non-empty directory cannot be removed;
-	// the delete still succeeds and logs the leftover.
+	// A leg "file" that is a non-empty directory cannot be removed: the
+	// delete fails and keeps the call, rather than leaving the file to
+	// come back as a recovered orphan.
 	stuck := filepath.Join(e.recDir, "stuck.wav")
 	if err := os.MkdirAll(filepath.Join(stuck, "child"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -473,14 +474,25 @@ func TestCov_Delete(t *testing.T) {
 	wantStatus(t, "delete bad csrf", del(itoa(callID), url.Values{"csrf_token": {"nope"}}), http.StatusForbidden)
 	wantStatus(t, "delete bad id", del("abc", url.Values{"csrf_token": {csrf}}), http.StatusNotFound)
 
+	wantStatus(t, "delete with a stuck file", del(itoa(callID), url.Values{"csrf_token": {csrf}}),
+		http.StatusInternalServerError)
+
+	if c, _ := e.store.GetCall(context.Background(), callID); c == nil {
+		t.Error("the call went although its file stayed")
+	}
+
+	if !strings.Contains(logs.String(), stuck) {
+		t.Errorf("failed file removal not logged: %q", logs.String())
+	}
+
+	if err := os.RemoveAll(stuck); err != nil {
+		t.Fatal(err)
+	}
+
 	wantRedirect(t, "delete", del(itoa(callID), url.Values{"csrf_token": {csrf}}), "Recording+deleted")
 
 	if c, _ := e.store.GetCall(context.Background(), callID); c != nil {
 		t.Error("call survived delete")
-	}
-
-	if !strings.Contains(logs.String(), "remove "+stuck) {
-		t.Errorf("failed file removal not logged: %q", logs.String())
 	}
 
 	_ = e.store.Close()
@@ -716,12 +728,11 @@ func TestCov_Settings(t *testing.T) {
 		t.Errorf("settings page after purge = %d, still says never", r.status)
 	}
 
-	// The purge cannot read leg paths.
-	e.execSQL(t, `ALTER TABLE legs RENAME TO cov_legs`)
+	// The purge cannot list the expired calls.
+	e.execSQL(t, `ALTER TABLE calls RENAME TO cov_calls`)
 	wantStatus(t, "purge failure", purge(url.Values{"csrf_token": {csrf}}), http.StatusInternalServerError)
 
 	// Settings load but the call count does not.
-	e.execSQL(t, `ALTER TABLE cov_legs RENAME TO legs`, `ALTER TABLE calls RENAME TO cov_calls`)
 	wantStatus(t, "settings call count failure", covGet(t, admin, u+"/admin/settings"), http.StatusInternalServerError)
 
 	// The retention setting itself is unreadable.

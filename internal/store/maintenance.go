@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
+	"log"
 	"strconv"
 	"time"
 )
@@ -81,33 +81,38 @@ func (s *Store) EffectiveRetentionDays(ctx context.Context, envDefault int) (day
 // records the run in settings for the admin UI. A retentionDays of
 // 0 (or less) disables the purge and deletes nothing. AMD-only and
 // disposition-only rows age by their notification time, which is
-// their started_at.
+// their started_at. Each call goes as DeleteCall removes it; one whose
+// files cannot be removed is kept, whole, for the next run.
 func (s *Store) PurgeExpired(ctx context.Context, retentionDays int) (calls int, files int, err error) {
 	if retentionDays <= 0 {
 		return 0, 0, nil
 	}
 
-	cutoff := time.Now().AddDate(0, 0, -retentionDays)
-
-	paths, n, err := s.DeleteCallsStartedBefore(ctx, cutoff)
+	ids, err := s.expiredCallIDs(ctx, time.Now().AddDate(0, 0, -retentionDays))
 	if err != nil {
 		return 0, 0, err
 	}
 
-	removed := 0
+	for _, id := range ids {
+		paths, derr := s.DeleteCall(ctx, id)
+		if derr != nil {
+			log.Printf("[store] retention purge: %v (kept for the next run)", derr)
 
-	for _, p := range paths {
-		if rerr := os.Remove(p); rerr == nil || os.IsNotExist(rerr) {
-			removed++
+			continue
+		}
+
+		if paths != nil {
+			calls++
+			files += len(paths)
 		}
 	}
 
 	_ = s.SetSetting(ctx, SettingLastPurgeAt,
 		strconv.FormatInt(time.Now().Unix(), 10))
-	_ = s.SetSetting(ctx, SettingLastPurgeCalls, strconv.Itoa(n))
-	_ = s.SetSetting(ctx, SettingLastPurgeFiles, strconv.Itoa(removed))
+	_ = s.SetSetting(ctx, SettingLastPurgeCalls, strconv.Itoa(calls))
+	_ = s.SetSetting(ctx, SettingLastPurgeFiles, strconv.Itoa(files))
 
-	return n, removed, nil
+	return calls, files, nil
 }
 
 // LastPurge returns when the purge last ran and what it removed
