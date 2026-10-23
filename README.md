@@ -285,6 +285,13 @@ without needing the recording dialog's SIP Call-ID.
   cases the SRS then sends its own BYE to the SRC's Contact (bounded
   to 2 s, not retried), so the SRC stops forking audio at a port the
   pool will reuse; mod_siprec v1.7.1+ stops its fork on that BYE.
+- **Legs that heard nothing:** a leg that never received an RTP packet
+  while another leg of the dialog did is a declared stream the SRC
+  never used (mod_siprec sends one mixed stream when the call's audio
+  is multichannel): it gets no leg row and its empty WAV is deleted.
+  When no leg heard anything, the legs are kept and marked "no audio"
+  on the call page and in the list, so the call stays on record with
+  the reason.
 - **Crash recovery:** if the SRS itself dies mid-recording, the WAVs
   on disk are adopted at the next startup: their headers are repaired
   in place (a crashed file still carries the writer's placeholder
@@ -714,7 +721,7 @@ WantedBy=multi-user.target
 | INVITE answered 400 `bad SDP` | SRC sent no SDP part, or a non-SIPREC INVITE reached the listener |
 | BYE/re-INVITE answered 481 | In-dialog request from a different From-tag or source IP than the INVITE — the dialog check rejected it; the recording is untouched |
 | Recording ends early; log says `reaping idle session` | No BYE arrived and no RTP flowed for `SIPREC_SESSION_IDLE_SEC` — the reaper finalized it (check the SRC/network for the lost BYE) |
-| Recording has a WAV but it is silent/short | RTP never arrived: the SDP answer's `c=IN IP4` (`SIPREC_LOCAL_IP`) is not reachable from FreeSWITCH, or a firewall drops the UDP pool range |
+| Recording has a WAV but it is silent/short, or is marked "no audio" | RTP never arrived: the SDP answer's `c=IN IP4` (`SIPREC_LOCAL_IP`) is not reachable from FreeSWITCH, or a firewall drops the UDP pool range |
 | Recording never starts over UDP, works over TCP | Multipart body over the path MTU — switch the SRC entry to `transport=tcp` |
 | Notify returns 401 | Wrong/missing secret (check Bearer value against `NOTIFY_SECRET`) |
 | Notify returns 503 | `NOTIFY_SECRET` is not set — the endpoint disables itself rather than run open |

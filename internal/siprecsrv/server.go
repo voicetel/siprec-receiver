@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"mime/multipart"
@@ -95,6 +96,9 @@ type FinalizedLeg struct {
 	Metadata    *Recording // parsed RS-Metadata (same pointer for every leg of a call)
 	MetadataXML string     // raw RS-Metadata body as received; "" when absent
 	WriteErr    string     // first WAV write/close error, "" when the leg recorded cleanly
+	// NoAudio: the leg never received an RTP packet. Reported only
+	// when no leg of the dialog did; otherwise such a leg is dropped.
+	NoAudio bool
 }
 
 // Finalizer is notified once per leg when a SIPREC session ends (BYE,
@@ -595,6 +599,10 @@ func (sh *sharedState) reaperLoop(ctx context.Context) {
 }
 
 func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
+	// Stop every leg first: whether a silent leg is worth keeping
+	// depends on whether any other leg heard audio.
+	heard := false
+
 	for _, l := range sess.legs {
 		l.receiver.Stop()
 
@@ -602,14 +610,32 @@ func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
 			log.Printf("[siprecsrv] %q: wav close: %v", sess.callID, err)
 		}
 
-		dur := l.writer.durationSec()
-
 		sh.pool.Release(l.port)
+
+		heard = heard || l.writer.samples > 0
+	}
+
+	for _, l := range sess.legs {
+		noAudio := l.writer.samples == 0
+		if noAudio && heard {
+			// A declared stream the SRC never sent, such as the second
+			// stream when mod_siprec falls back to one mixed stream for
+			// a multichannel call: no row, and no file (orphan recovery
+			// would import the empty WAV later).
+			log.Printf("[siprecsrv] %q: leg %q received no audio; dropped", sess.callID, l.label)
+
+			if err := os.Remove(l.wavPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				log.Printf("[siprecsrv] %q: remove empty wav: %v", sess.callID, err)
+			}
+
+			continue
+		}
 
 		if sh.finalizer == nil {
 			continue
 		}
 
+		dur := l.writer.durationSec()
 		fsUUID, _ := sess.metadata.FsUUID()
 
 		writeErr := ""
@@ -631,6 +657,7 @@ func (sh *sharedState) finalizeSession(ctx context.Context, sess *session) {
 			Metadata:    sess.metadata,
 			MetadataXML: sess.metadataXML,
 			WriteErr:    writeErr,
+			NoAudio:     noAudio,
 		}); err != nil {
 			log.Printf("[siprecsrv] %q: finalize leg %q: %v", sess.callID, l.label, err)
 		}

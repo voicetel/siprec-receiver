@@ -71,6 +71,7 @@ type Call struct {
 	UpdatedAt         time.Time
 	LegCount          int
 	HasWriteError     bool  // any leg carries a WAV write error
+	HasNoAudio        bool  // a leg received no audio at all
 	Legs              []Leg // populated by GetCall
 	// ParentCallSid is set on a <Dial> child leg: the CallSid of the
 	// call that dialed it (and that SIPREC recorded).
@@ -89,6 +90,7 @@ type Leg struct {
 	WAVPath        string
 	DurationSec    int
 	WriteError     string // first WAV write error; "" when the leg recorded cleanly
+	NoAudio        bool   // no RTP ever arrived for this leg
 	CreatedAt      time.Time
 }
 
@@ -339,6 +341,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
 	for _, col := range []struct{ name, ddl string }{
 		{"write_error", `ALTER TABLE legs ADD COLUMN write_error TEXT NOT NULL DEFAULT ''`},
 		{"sip_call_id", `ALTER TABLE legs ADD COLUMN sip_call_id TEXT NOT NULL DEFAULT ''`},
+		{"no_audio", `ALTER TABLE legs ADD COLUMN no_audio INTEGER NOT NULL DEFAULT 0`},
 	} {
 		if err := s.addColumnIfMissing(ctx, "legs", col.name, col.ddl); err != nil {
 			return err
@@ -522,14 +525,14 @@ func (s *Store) RecordLeg(ctx context.Context, leg siprecsrv.FinalizedLeg) error
 	}
 
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO legs (call_id, sip_call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO legs (call_id, sip_call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, no_audio, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(call_id, wav_path) DO UPDATE SET
 	label = excluded.label, codec = excluded.codec, sip_call_id = excluded.sip_call_id,
 	participant_aor = excluded.participant_aor, duration_sec = excluded.duration_sec,
-	write_error = excluded.write_error;`,
+	write_error = excluded.write_error, no_audio = excluded.no_audio;`,
 		callPK, leg.CallID, leg.Label, leg.Codec, participantForLabel(leg.Metadata, leg.Label),
-		leg.WAVPath, leg.DurationSec, leg.WriteErr, millis(now))
+		leg.WAVPath, leg.DurationSec, leg.WriteErr, boolInt(leg.NoAudio), millis(now))
 	if err != nil {
 		return fmt.Errorf("store: insert leg %s: %w", leg.Label, err)
 	}
@@ -835,14 +838,15 @@ const callCols = `SELECT id, COALESCE(sip_call_id,''), COALESCE(call_sid,''), CO
 	voiceml_fetched_at, created_at, updated_at, parent_call_sid,
 	COALESCE((SELECT p.id FROM calls p WHERE calls.parent_call_sid != '' AND p.call_sid = calls.parent_call_sid), 0),
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id),
-	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.write_error != '')`
+	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.write_error != ''),
+	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.no_audio != 0)`
 
 func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 	var c Call
 
 	var started, ended, amdAt, dispAt, vmAt, created, updated int64
 
-	var writeErrLegs int
+	var writeErrLegs, silentLegs int
 
 	if err := src.Scan(&c.ID, &c.SipCallID, &c.CallSid, &c.FsUUID, &c.AccountSid,
 		&c.FromURI, &c.FromNumber, &c.ToNumber, &c.Direction, &started, &ended,
@@ -850,11 +854,11 @@ func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 		&amdAt, &c.AMDRaw, &c.MetadataJSON, &c.MetadataXML,
 		&c.DispStatus, &c.DispDurationSec, &c.DispSipCode, &c.DispErrorCode,
 		&c.DispErrorMessage, &dispAt, &c.DispRaw, &c.VoiceMLRecordJSON, &vmAt,
-		&created, &updated, &c.ParentCallSid, &c.ParentID, &c.LegCount, &writeErrLegs); err != nil {
+		&created, &updated, &c.ParentCallSid, &c.ParentID, &c.LegCount, &writeErrLegs, &silentLegs); err != nil {
 		return Call{}, fmt.Errorf("store: scan call: %w", err)
 	}
 
-	c.HasWriteError = writeErrLegs > 0
+	c.HasWriteError, c.HasNoAudio = writeErrLegs > 0, silentLegs > 0
 
 	c.StartedAt, c.EndedAt, c.AMDNotifiedAt = fromMillis(started), fromMillis(ended), fromMillis(amdAt)
 	c.DispNotifiedAt, c.VoiceMLFetchedAt = fromMillis(dispAt), fromMillis(vmAt)
@@ -875,7 +879,7 @@ func (s *Store) GetCall(ctx context.Context, id int64) (*Call, error) {
 	}
 
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, created_at
+		`SELECT id, call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, no_audio, created_at
 		 FROM legs WHERE call_id = ? ORDER BY id`, id)
 	if err != nil {
 		return nil, fmt.Errorf("store: list legs %d: %w", id, err)
@@ -889,7 +893,7 @@ func (s *Store) GetCall(ctx context.Context, id int64) (*Call, error) {
 		var created int64
 
 		if err := rows.Scan(&l.ID, &l.CallID, &l.Label, &l.Codec, &l.ParticipantAOR,
-			&l.WAVPath, &l.DurationSec, &l.WriteError, &created); err != nil {
+			&l.WAVPath, &l.DurationSec, &l.WriteError, &l.NoAudio, &created); err != nil {
 			return nil, fmt.Errorf("store: scan leg: %w", err)
 		}
 
@@ -911,9 +915,9 @@ func (s *Store) GetLeg(ctx context.Context, id int64) (*Leg, error) {
 	var created int64
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, created_at
+		`SELECT id, call_id, label, codec, participant_aor, wav_path, duration_sec, write_error, no_audio, created_at
 		 FROM legs WHERE id = ?`, id).
-		Scan(&l.ID, &l.CallID, &l.Label, &l.Codec, &l.ParticipantAOR, &l.WAVPath, &l.DurationSec, &l.WriteError, &created)
+		Scan(&l.ID, &l.CallID, &l.Label, &l.Codec, &l.ParticipantAOR, &l.WAVPath, &l.DurationSec, &l.WriteError, &l.NoAudio, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

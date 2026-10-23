@@ -689,7 +689,7 @@ func TestListCalls_FailuresAfterCount(t *testing.T) {
 		recordSimpleLeg(t, s, "dlg-r", time.Now())
 		addBoom(t, s)
 		mustExec(t, s, `DROP TABLE legs`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT calls.id AS call_id, abs(boom.x) AS write_error FROM calls, boom`)
+		mustExec(t, s, `CREATE VIEW legs AS SELECT calls.id AS call_id, abs(boom.x) AS write_error, 0 AS no_audio FROM calls, boom`)
 
 		_, _, err := s.ListCalls(context.Background(), ListFilter{})
 		wantErr(t, err, "list calls rows")
@@ -755,7 +755,7 @@ func TestGetCall_Paths(t *testing.T) {
 		addBoom(t, s)
 		mustExec(t, s, `ALTER TABLE legs RENAME TO legs_real`)
 		mustExec(t, s, `CREATE VIEW legs AS SELECT legs_real.id, call_id, label, codec, participant_aor,
-			wav_path, duration_sec, write_error, abs(boom.x) AS created_at FROM legs_real, boom`)
+			wav_path, duration_sec, write_error, no_audio, abs(boom.x) AS created_at FROM legs_real, boom`)
 
 		_, err := s.GetCall(ctx, id)
 		wantErr(t, err, "legs rows")

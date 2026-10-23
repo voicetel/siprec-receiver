@@ -79,6 +79,7 @@
     {{if .ParticipantAOR}}— {{.ParticipantAOR}}{{end}}
     — {{fmtDur .DurationSec}}</p>
   {{if .WriteError}}<p style="color:#b91c1c"><strong>⚠ WAV write error:</strong> {{.WriteError}} — this leg's audio may be truncated.</p>{{end}}
+  {{if .NoAudio}}<p style="color:#b45309"><strong>⚠ No audio received:</strong> no RTP from the recording client ever reached this leg. Check that it can reach the advertised SIPREC_LOCAL_IP and the RTP port range.</p>{{end}}
   <audio controls preload="none"
     src="/recordings/{{$.Call.ID}}/legs/{{.ID}}/audio"></audio>
   <p><a href="/recordings/{{$.Call.ID}}/legs/{{.ID}}/audio?download=1">Download WAV</a></p>

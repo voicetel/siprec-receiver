@@ -245,6 +245,6 @@ The call's billable length is read from `CallDuration` (seconds);
 |---|---|
 | `siprec-error` callback / error 31940, or REST 400 / 13520 | `connectorName` does not match an **enabled** connector on this account (names are exact) |
 | `siprec-started` fires but nothing appears in siprec-receiver | SIP is not reaching `SIPREC_LISTEN`: firewall, wrong host/port in the connector URI, or UDP fragmentation (switch to `transport=tcp`) |
-| Recording row exists but the WAV is silent | RTP is not reaching `SIPREC_LOCAL_IP` / the RTP port range |
+| Recording row exists but the WAV is silent, or it is marked "no audio" | RTP is not reaching `SIPREC_LOCAL_IP` / the RTP port range |
 | Outbound calls never record, inbound calls do | The media servers run a mod_siprec build older than v1.7.1 (see [Outbound calls](#4-outbound-calls)) |
 | AMD/status rows never merge with recordings | The recording was made before this receiver version (no derived `call_sid`), or the webhooks point at another account's receiver |
