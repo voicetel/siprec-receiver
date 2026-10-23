@@ -1677,7 +1677,7 @@ func splitBody(req *sip.Request) (sdp, metadata string, multi bool, err error) {
 		return string(body), "", false, nil
 	}
 
-	if strings.HasPrefix(mediaType, "application/rs-metadata") {
+	if isMetadataType(mediaType) {
 		return "", string(body), false, nil
 	}
 
@@ -1707,15 +1707,27 @@ func splitBody(req *sip.Request) (sdp, metadata string, multi bool, err error) {
 			return "", "", true, fmt.Errorf("multipart part read: %w", rerr)
 		}
 
-		switch partType := part.Header.Get("Content-Type"); {
-		case strings.HasPrefix(partType, "application/sdp"):
+		// Media types are case-insensitive (RFC 2045 §5.1). A broken
+		// parameter still yields the type; a part with no parseable type
+		// is neither SDP nor metadata.
+		partType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
+
+		switch {
+		case partType == "application/sdp":
 			sdp = string(buf)
-		case strings.HasPrefix(partType, "application/rs-metadata"):
+		case isMetadataType(partType):
 			metadata = string(buf)
 		}
 	}
 
 	return sdp, metadata, true, nil
+}
+
+// isMetadataType reports whether a parsed (lowercased) media type is
+// RS-Metadata: RFC 7866's application/rs-metadata+xml, or the bare form
+// some SRCs send. application/rs-metadata-request is not metadata.
+func isMetadataType(mediaType string) bool {
+	return mediaType == "application/rs-metadata+xml" || mediaType == "application/rs-metadata"
 }
 
 // callIDOf extracts the trimmed SIP Call-ID, or "" when the header
