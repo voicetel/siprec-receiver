@@ -124,6 +124,9 @@ type AMDNotification struct {
 	FsUUID        string
 	ParentCallSid string // set when CallSid is a <Dial> child leg
 	Raw           string // request body as received, for audit display
+	// AuthAccount, when set, limits the notification to that account's
+	// calls (it was authorized by the account's webhook signature).
+	AuthAccount string
 }
 
 // ErrNoKey is returned by ApplyAMD when a notification carries no
@@ -628,7 +631,7 @@ func (s *Store) ApplyAMD(ctx context.Context, n AMDNotification) (int64, bool, e
 
 	defer func() { _ = tx.Rollback() }()
 
-	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID})
+	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID, Account: n.AuthAccount})
 	if err != nil {
 		return 0, false, err
 	}
@@ -1122,6 +1125,7 @@ type DispositionNotification struct {
 	FsUUID         string
 	ParentCallSid  string // set when CallSid is a <Dial> child leg
 	Raw            string
+	AuthAccount    string // as AMDNotification.AuthAccount
 }
 
 // ApplyDisposition logs one final call outcome, with the same
@@ -1142,7 +1146,7 @@ func (s *Store) ApplyDisposition(ctx context.Context, n DispositionNotification)
 
 	defer func() { _ = tx.Rollback() }()
 
-	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID})
+	id, err := resolveCall(ctx, tx, callKeys{CallSid: n.CallSid, SipCallID: n.SipCallID, FsUUID: n.FsUUID, Account: n.AuthAccount})
 	if err != nil {
 		return 0, false, err
 	}

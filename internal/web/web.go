@@ -31,6 +31,7 @@ type Server struct {
 	RecordingDir        string
 	NotifySecret        string
 	VoiceMLBaseURL      string // VoiceML base URL for on-request record fetches; "" disables
+	PublicBaseURL       string // the URL senders reach this server at; signed webhooks are checked against it
 	RetentionEnvDefault int    // RETENTION_DAYS fallback until an admin saves a setting
 
 	secretQueryWarn sync.Once

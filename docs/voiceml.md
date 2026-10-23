@@ -192,10 +192,20 @@ For outbound calls, the stored `fs_uuid` is the dashed form of the
 CallSid's hex digits, not the literal `CA…` channel UUID FreeSWITCH
 shows.
 
-Send AMD and the final status to siprec-receiver (`?secret=` because
-VoiceML's webhook sender cannot set headers). Either callback method
-works; with `StatusCallbackMethod=GET` the fields arrive as the query
-string:
+Send AMD and the final status to siprec-receiver. VoiceML's webhook
+sender cannot set headers, so authorize the callbacks one of two ways:
+
+- **Signature (recommended):** store the account's API key under
+  **Integrations** in siprec-receiver and set `PUBLIC_BASE_URL` to the
+  exact `https://` origin the callback URLs use. VoiceML signs every
+  callback with that key (`X-Twilio-Signature`), so the URLs need no
+  secret and nothing sensitive lands in access logs. A signed callback
+  can only update its own account's calls.
+- **`?secret=`:** append the notify secret to each callback URL, as
+  below.
+
+Either callback method works; with `StatusCallbackMethod=GET` the
+fields arrive as the query string:
 
 ```sh
 curl -u "AC…:$AUTH" "$VOICEML_API/2010-04-01/Accounts/AC…/Calls.json" \

@@ -127,7 +127,7 @@ All configuration is environment variables (see also `.env.example`).
 | `RECORDING_DIR` | `./data/recordings` | Where WAV files are written (`0600` files in a `0700` directory) |
 | `DB_PATH` | `./data/siprec-receiver.db` | SQLite database path (WAL mode, `0600`) |
 | `HTTP_LISTEN` | `127.0.0.1:8080` | Web UI + notify endpoint listen address |
-| `PUBLIC_BASE_URL` | `http://127.0.0.1:8080` | Public base URL; the OAuth redirect is `<base>/auth/callback` |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:8080` | Public base URL; the OAuth redirect is `<base>/auth/callback`, and signed VoiceML callbacks are verified against `<base>` plus the request path |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth client (see below) |
 | `GOOGLE_HOSTED_DOMAIN` | — | When set, sign-in requires a Google Workspace account from this domain (the `hd` claim) |
 | `SESSION_SECRET` | ephemeral | HMAC secret for session cookies (at least 32 bytes when set); set a stable random value in production or every restart signs everyone out |
@@ -318,6 +318,17 @@ Auth is the `NOTIFY_SECRET` shared secret, presented as
 sender is one). With no secret configured the endpoint answers 503
 rather than running open.
 
+A VoiceML callback can authorize itself instead with the
+`X-Twilio-Signature` it already carries, which keeps the secret out of
+callback URLs and access logs. The signature is checked with the API
+key stored for the payload's `AccountSid` under **Integrations**,
+over `PUBLIC_BASE_URL` plus the request path and query (so
+`PUBLIC_BASE_URL` must be the exact scheme and host the callback URL
+names). A request authorized by an account's signature may only touch
+that account's calls: one naming a call stored under another account
+is refused with 403 and changes nothing. JSON bodies are not signed
+this way; send those with the secret.
+
 Notifications are upserts, order-independent:
 
 - AMD **after** the recording: the recording's row gains the disposition.
@@ -364,7 +375,8 @@ curl -X POST https://srs.example.com/api/notify/amd \
 
 `matched` tells the poster whether a recording row already existed.
 Responses: 200 logged · 400 malformed/no key/no `AnsweredBy` · 401 bad
-secret · 503 endpoint disabled. Bodies are capped at 64 KB; the raw
+secret and no valid signature · 403 signed for another account's call ·
+503 endpoint disabled. Bodies are capped at 64 KB; the raw
 payload is kept on the call record for audit and shown in the UI.
 
 ## Call disposition notifications

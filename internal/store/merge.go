@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -22,17 +23,25 @@ type callKeys struct {
 	CallSid   string
 	SipCallID string // a SIPREC dialog's Call-ID: the row's own or any leg's
 	FsUUID    string
+	// Account, when set, is the only account the event may touch: a row
+	// it names that belongs to another account is ErrForeignAccount.
+	Account string
 }
+
+// ErrForeignAccount reports a notification, authorized for one account,
+// that names a call stored under another.
+var ErrForeignAccount = errors.New("the call belongs to another account")
 
 // candidateRow is one row a key names.
 type candidateRow struct {
-	id        int64
-	callSid   string
-	completed bool
-	rank      int // which key found it: 0 CallSid, 1 dialog, 2 FsUUID
+	id         int64
+	callSid    string
+	accountSid string
+	completed  bool
+	rank       int // which key found it: 0 CallSid, 1 dialog, 2 FsUUID
 }
 
-const candidateCols = `SELECT id, COALESCE(call_sid, ''), status FROM calls`
+const candidateCols = `SELECT id, COALESCE(call_sid, ''), account_sid, status FROM calls`
 
 // findCandidates returns every row the keys name, each once, in key
 // order (CallSid, dialog, FsUUID).
@@ -55,7 +64,7 @@ func findCandidates(ctx context.Context, tx *sql.Tx, k callKeys) ([]candidateRow
 				status string
 			)
 
-			if err := rows.Scan(&c.id, &c.callSid, &status); err != nil {
+			if err := rows.Scan(&c.id, &c.callSid, &c.accountSid, &status); err != nil {
 				return fmt.Errorf("store: scan call row: %w", err)
 			}
 
@@ -129,6 +138,12 @@ func resolveCall(ctx context.Context, tx *sql.Tx, k callKeys) (int64, error) {
 
 	if len(keep) == 0 {
 		return 0, nil
+	}
+
+	for _, c := range keep {
+		if k.Account != "" && c.accountSid != "" && c.accountSid != k.Account {
+			return 0, ErrForeignAccount
+		}
 	}
 
 	sort.SliceStable(keep, func(i, j int) bool {

@@ -416,6 +416,8 @@ func main() {
 		log.Fatalf("[main] %v", err)
 	}
 
+	webSrv.PublicBaseURL = cfg.PublicBaseURL
+
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPListen,
 		Handler:           webSrv.Handler(),

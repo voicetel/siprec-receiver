@@ -2,12 +2,16 @@ package web
 
 import (
 	"crypto/hmac"
+	"crypto/sha1" // #nosec G505 -- Twilio's webhook signature is HMAC-SHA1 by definition
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -36,30 +40,19 @@ import (
 //
 // Auth is a shared secret (NOTIFY_SECRET): Authorization: Bearer,
 // X-Notify-Secret, or ?secret= (the query form exists for webhook
-// senders like VoiceML's that cannot set custom headers).
+// senders like VoiceML's that cannot set custom headers). A VoiceML
+// callback can instead prove itself with its X-Twilio-Signature, made
+// with the API key stored for its AccountSid under Integrations; such a
+// notification may only touch that account's calls.
 // When NOTIFY_SECRET is unset the endpoint is disabled (503) rather
 // than open.
 func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
-	if s.NotifySecret == "" {
-		http.Error(w, "notify endpoint disabled (NOTIFY_SECRET not set)", http.StatusServiceUnavailable)
-
+	req, ok := s.readNotify(w, r)
+	if !ok {
 		return
 	}
 
-	if !s.notifyAuthorized(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-
-		return
-	}
-
-	fields, raw := parseNotifyBody(r, body)
+	fields := req.fields
 
 	answeredBy := fields["AnsweredBy"]
 	if answeredBy == "" {
@@ -81,22 +74,14 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 		Direction:  fields["Direction"],
 		SipCallID:  firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
 		FsUUID:     fields["FsUuid"],
-		Raw:        raw,
+		Raw:        req.raw,
 
 		ParentCallSid: fields["ParentCallSid"],
+		AuthAccount:   req.account,
 	}
 
 	id, matched, err := s.Store.ApplyAMD(r.Context(), n)
-	if errors.Is(err, store.ErrNoKey) {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-
-		return
-	}
-
-	if err != nil {
-		log.Printf("[notify] apply amd (CallSid=%q SipCallId=%q): %v", n.CallSid, n.SipCallID, err)
-		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
-
+	if notifyFailed(w, "amd", n.CallSid, n.SipCallID, err) {
 		return
 	}
 
@@ -114,26 +99,12 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 // endpoint; CallStatus is required instead of AnsweredBy. A
 // disposition carrying AnsweredBy also fills still-empty AMD fields.
 func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request) {
-	if s.NotifySecret == "" {
-		http.Error(w, "notify endpoint disabled (NOTIFY_SECRET not set)", http.StatusServiceUnavailable)
-
+	req, ok := s.readNotify(w, r)
+	if !ok {
 		return
 	}
 
-	if !s.notifyAuthorized(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-
-		return
-	}
-
-	fields, raw := parseNotifyBody(r, body)
+	fields := req.fields
 
 	if fields["CallStatus"] == "" {
 		http.Error(w, "CallStatus is required", http.StatusBadRequest)
@@ -164,20 +135,12 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 		SipCallID:      firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
 		FsUUID:         fields["FsUuid"],
 		ParentCallSid:  fields["ParentCallSid"],
-		Raw:            raw,
+		Raw:            req.raw,
+		AuthAccount:    req.account,
 	}
 
 	id, matched, err := s.Store.ApplyDisposition(r.Context(), n)
-	if errors.Is(err, store.ErrNoKey) {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-
-		return
-	}
-
-	if err != nil {
-		log.Printf("[notify] apply disposition (CallSid=%q SipCallId=%q): %v", n.CallSid, n.SipCallID, err)
-		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
-
+	if notifyFailed(w, "disposition", n.CallSid, n.SipCallID, err) {
 		return
 	}
 
@@ -188,6 +151,77 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 	_ = json.NewEncoder(w).Encode(map[string]any{"id": id, "matched": matched})
 }
 
+// notifyRequest is an authorized notification's parsed payload.
+type notifyRequest struct {
+	fields map[string]string
+	raw    string
+	// account is set when the AccountSid's webhook signature, not the
+	// shared secret, authorized the request.
+	account string
+}
+
+// readNotify runs what both notify endpoints share: enabled, body read
+// and parsed, authorized. On false the response has been written.
+func (s *Server) readNotify(w http.ResponseWriter, r *http.Request) (notifyRequest, bool) {
+	if s.NotifySecret == "" {
+		http.Error(w, "notify endpoint disabled (NOTIFY_SECRET not set)", http.StatusServiceUnavailable)
+
+		return notifyRequest{}, false
+	}
+
+	secretOK := s.notifyAuthorized(r)
+	if !secretOK && r.Header.Get(signatureHeader) == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		return notifyRequest{}, false
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+
+		return notifyRequest{}, false
+	}
+
+	fields, raw := parseNotifyBody(r, body)
+	if secretOK {
+		return notifyRequest{fields: fields, raw: raw}, true
+	}
+
+	account, err := s.signedBy(r, body, fields["AccountSid"])
+	if err != nil {
+		log.Printf("[notify] signature key lookup (AccountSid=%q): %v", fields["AccountSid"], err)
+		http.Error(w, "failed to verify the signature", http.StatusInternalServerError)
+
+		return notifyRequest{}, false
+	}
+
+	if account == "" {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+		return notifyRequest{}, false
+	}
+
+	return notifyRequest{fields: fields, raw: raw, account: account}, true
+}
+
+// notifyFailed answers a failed Apply* and reports whether it did.
+func notifyFailed(w http.ResponseWriter, kind, callSid, sipCallID string, err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, store.ErrNoKey):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, store.ErrForeignAccount):
+		http.Error(w, err.Error(), http.StatusForbidden)
+	default:
+		log.Printf("[notify] apply %s (CallSid=%q SipCallId=%q): %v", kind, callSid, sipCallID, err)
+		http.Error(w, "failed to log disposition", http.StatusInternalServerError)
+	}
+
+	return true
+}
+
 func (s *Server) notifyAuthorized(r *http.Request) bool {
 	querySecret := r.URL.Query().Get("secret")
 	if querySecret != "" && hmac.Equal([]byte(querySecret), []byte(s.NotifySecret)) {
@@ -195,7 +229,8 @@ func (s *Server) notifyAuthorized(r *http.Request) bool {
 		// headers, but URLs land in proxy/access logs — say so once.
 		s.secretQueryWarn.Do(func() {
 			log.Printf("[notify] WARNING: notify secret presented as ?secret= query parameter; " +
-				"it will appear in request logs. Prefer the Authorization: Bearer header.")
+				"it will appear in request logs. Prefer the Authorization: Bearer header, " +
+				"or let VoiceML's X-Twilio-Signature authorize its callbacks.")
 		})
 
 		return true
@@ -218,6 +253,103 @@ func (s *Server) notifyAuthorized(r *http.Request) bool {
 	}
 
 	return false
+}
+
+// signatureHeader is the header Twilio-compatible senders (VoiceML's
+// included) sign their webhooks with.
+const signatureHeader = "X-Twilio-Signature"
+
+// signedBy returns accountSid when r carries a valid webhook signature
+// made with that account's stored API key, else "". The signed URL is
+// the one the sender was configured with: PUBLIC_BASE_URL plus the
+// request URI.
+func (s *Server) signedBy(r *http.Request, body []byte, accountSid string) (string, error) {
+	if accountSid == "" || s.PublicBaseURL == "" {
+		return "", nil
+	}
+
+	acct, err := s.Store.GetVoiceMLAccount(r.Context(), accountSid)
+	if err != nil || acct == nil || acct.APIKey == "" {
+		return "", err
+	}
+
+	// A POST signs its form fields; a GET's are already in the URL.
+	// JSON bodies are not signed this way.
+	var params url.Values
+
+	if r.Method == http.MethodPost {
+		if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+			return "", nil
+		}
+
+		params, _ = url.ParseQuery(string(body))
+	}
+
+	got := []byte(r.Header.Get(signatureHeader))
+
+	for _, u := range signedURLs(s.PublicBaseURL + r.URL.RequestURI()) {
+		if hmac.Equal(got, []byte(webhookSignature(acct.APIKey, u, params))) {
+			return accountSid, nil
+		}
+	}
+
+	return "", nil
+}
+
+// webhookSignature is Twilio's X-Twilio-Signature: the base64
+// HMAC-SHA1, keyed with the account's API key, of the URL followed by
+// every form field's name and value in name order.
+func webhookSignature(key, rawURL string, params url.Values) string {
+	names := make([]string, 0, len(params))
+	for name := range params {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	var b strings.Builder
+
+	b.WriteString(rawURL)
+
+	for _, name := range names {
+		for _, v := range params[name] {
+			b.WriteString(name)
+			b.WriteString(v)
+		}
+	}
+
+	mac := hmac.New(sha1.New, []byte(key))
+	_, _ = mac.Write([]byte(b.String()))
+
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// signedURLs are the forms of rawURL a sender may have signed: as is,
+// and with the scheme's default port added or removed (senders and
+// proxies differ on whether ":443" is part of the URL).
+func signedURLs(rawURL string) []string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return []string{rawURL}
+	}
+
+	defaultPort := map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	if defaultPort == "" {
+		return []string{rawURL}
+	}
+
+	alt := *u
+
+	switch u.Port() {
+	case "":
+		alt.Host = net.JoinHostPort(u.Hostname(), defaultPort)
+	case defaultPort:
+		alt.Host = strings.TrimSuffix(u.Host, ":"+defaultPort)
+	default:
+		return []string{rawURL}
+	}
+
+	return []string{rawURL, alt.String()}
 }
 
 // parseNotifyBody accepts JSON or form-encoding (VoiceML/Twilio

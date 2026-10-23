@@ -103,10 +103,14 @@ paths:
         Authentication is the `NOTIFY_SECRET` shared secret, presented as
         `Authorization: Bearer <secret>` (preferred), the `X-Notify-Secret`
         header, or the `secret` query parameter (for webhook senders that
-        cannot set headers; URLs are logged, so prefer the header). When no
-        secret is configured the endpoint answers 503 rather than run open.
+        cannot set headers; URLs are logged, so prefer the header). A VoiceML
+        callback can present its `X-Twilio-Signature` instead (see the
+        `WebhookSignature` scheme), which keeps the secret out of the URL.
+        When no secret is configured the endpoint answers 503 rather than
+        run open.
       security:
         - NotifySecret: []
+        - WebhookSignature: []
       requestBody:
         required: true
         description: AMD fields, form-encoded (webhook shape) or JSON.
@@ -142,6 +146,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForeignAccount'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -159,6 +165,7 @@ paths:
         query, without `secret`, is kept as the raw payload.
       security:
         - NotifySecret: []
+        - WebhookSignature: []
       parameters:
         - name: fields
           in: query
@@ -183,6 +190,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForeignAccount'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -203,6 +212,7 @@ paths:
         audio duration.
       security:
         - NotifySecret: []
+        - WebhookSignature: []
       requestBody:
         required: true
         description: Final-outcome fields, form-encoded (webhook shape) or JSON.
@@ -234,6 +244,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForeignAccount'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -251,6 +263,7 @@ paths:
         query, without `secret`, is kept as the raw payload.
       security:
         - NotifySecret: []
+        - WebhookSignature: []
       parameters:
         - name: fields
           in: query
@@ -276,6 +289,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/ForeignAccount'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -897,6 +912,19 @@ components:
         <secret>` (this scheme), or as the `X-Notify-Secret` header, or as
         the `secret` query parameter for webhook senders that cannot set
         headers. When no secret is configured the endpoints answer 503.
+    WebhookSignature:
+      type: apiKey
+      in: header
+      name: X-Twilio-Signature
+      description: |
+        A VoiceML (Twilio-shaped) callback's own signature, instead of the
+        secret: base64 HMAC-SHA1 of the URL the sender was configured with
+        (`PUBLIC_BASE_URL` plus the request URI; with or without the default
+        port) followed, for a form POST, by every field's name and value in
+        name order. The key is the API key stored for the payload's
+        `AccountSid` under Integrations. A request authorized this way may
+        only touch that account's calls (403 otherwise). JSON bodies are not
+        signed this way.
     SessionCookie:
       type: apiKey
       in: cookie
@@ -929,7 +957,13 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorText'
     Unauthorized:
-      description: Missing or wrong notify secret.
+      description: Missing or wrong notify secret, and no webhook signature that verifies.
+      content:
+        text/plain:
+          schema:
+            $ref: '#/components/schemas/ErrorText'
+    ForeignAccount:
+      description: Authorized by one account's webhook signature, the notification names a call stored under another account. Nothing was changed.
       content:
         text/plain:
           schema:
