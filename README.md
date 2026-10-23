@@ -512,7 +512,9 @@ routes are `GET /healthz`, the OpenAPI spec and docs (below), the
 OAuth flow, and the secret-gated notify endpoints. Sign-out is a
 POST form (a cross-site GET cannot
 log a user out), and all responses carry `X-Frame-Options: DENY`, a
-frame-ancestors CSP, and `nosniff`.
+frame-ancestors CSP, `nosniff`, and `Cache-Control: no-store` (pages
+and recordings hold call audio and numbers; only the public OpenAPI
+spec may be cached).
 
 ## API documentation (OpenAPI + ReDoc)
 

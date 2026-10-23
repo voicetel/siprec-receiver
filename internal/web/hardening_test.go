@@ -31,6 +31,28 @@ func TestSecurityHeadersPresent(t *testing.T) {
 	if got := resp.Header.Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 		t.Errorf("CSP = %q", got)
 	}
+
+	if got := resp.Header.Get("Cache-Control"); got != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", got)
+	}
+}
+
+// Recordings are never cached, though ServeContent sends Last-Modified;
+// the public spec still is.
+func TestCachingOnlyForThePublicSpec(t *testing.T) {
+	e := newCovEnv(t, covOpts{})
+	callID, legID := e.seedCall(t)
+	admin, _ := e.adminSession(t)
+
+	r := covGet(t, admin, e.srv.URL+"/recordings/"+itoa(callID)+"/legs/"+itoa(legID)+"/audio")
+	if r.status != http.StatusOK || r.header.Get("Cache-Control") != "no-store" {
+		t.Errorf("audio = %d, Cache-Control %q", r.status, r.header.Get("Cache-Control"))
+	}
+
+	r = covGet(t, http.DefaultClient, e.srv.URL+"/openapi.yaml")
+	if got := r.header.Get("Cache-Control"); got != "public, max-age=300" {
+		t.Errorf("spec Cache-Control = %q", got)
+	}
 }
 
 // Logout is POST-only (a cross-site GET must not sign a user out),

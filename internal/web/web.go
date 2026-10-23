@@ -205,11 +205,15 @@ func (s *Server) Handler() http.Handler {
 
 // securityHeaders adds the baseline hardening headers to every
 // response: no framing (the pages carry destructive admin actions),
-// no MIME sniffing, same-origin referrers, and a CSP that only
-// allows our own pages, styles, and audio.
+// no MIME sniffing, same-origin referrers, a CSP that only allows our
+// own pages, styles, and audio, and no caching: pages and recordings
+// hold call audio and numbers, and http.ServeContent's Last-Modified
+// would otherwise invite a caching proxy to keep them. A handler that
+// serves something public (the spec) sets its own Cache-Control.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
+		h.Set("Cache-Control", "no-store")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy",
