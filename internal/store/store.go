@@ -72,6 +72,10 @@ type Call struct {
 	LegCount          int
 	HasWriteError     bool  // any leg carries a WAV write error
 	Legs              []Leg // populated by GetCall
+	// ParentCallSid is set on a <Dial> child leg: the CallSid of the
+	// call that dialed it (and that SIPREC recorded).
+	ParentCallSid string
+	ParentID      int64 // the parent's row, 0 when it is not stored
 }
 
 // Leg is one recorded audio stream of a call (one WAV file). mod_siprec
@@ -108,17 +112,18 @@ type User struct {
 // CallStatus, Direction), plus the SIPREC correlation keys SipCallId
 // and FsUuid a poster that knows them can add.
 type AMDNotification struct {
-	CallSid    string
-	AccountSid string
-	AnsweredBy string
-	DurationMs int
-	From       string
-	To         string
-	CallStatus string
-	Direction  string
-	SipCallID  string
-	FsUUID     string
-	Raw        string // request body as received, for audit display
+	CallSid       string
+	AccountSid    string
+	AnsweredBy    string
+	DurationMs    int
+	From          string
+	To            string
+	CallStatus    string
+	Direction     string
+	SipCallID     string
+	FsUUID        string
+	ParentCallSid string // set when CallSid is a <Dial> child leg
+	Raw           string // request body as received, for audit display
 }
 
 // ErrNoKey is returned by ApplyAMD when a notification carries no
@@ -368,10 +373,16 @@ CREATE INDEX IF NOT EXISTS idx_legs_sip_call_id ON legs(sip_call_id);`); err != 
 		{"disp_event_at", `ALTER TABLE calls ADD COLUMN disp_event_at INTEGER NOT NULL DEFAULT 0`},
 		{"voiceml_record_json", `ALTER TABLE calls ADD COLUMN voiceml_record_json TEXT NOT NULL DEFAULT ''`},
 		{"voiceml_fetched_at", `ALTER TABLE calls ADD COLUMN voiceml_fetched_at INTEGER NOT NULL DEFAULT 0`},
+		{"parent_call_sid", `ALTER TABLE calls ADD COLUMN parent_call_sid TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := s.addColumnIfMissing(ctx, "calls", col.name, col.ddl); err != nil {
 			return err
 		}
+	}
+
+	if _, err := s.db.ExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_calls_parent_call_sid ON calls(parent_call_sid)`); err != nil {
+		return fmt.Errorf("store: migrate parent index: %w", err)
 	}
 
 	// Schema version stamp. Migrations above are idempotent
@@ -637,21 +648,24 @@ UPDATE calls SET
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
 	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
 	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
+	parent_call_sid = CASE WHEN parent_call_sid = '' THEN ? ELSE parent_call_sid END,
 	updated_at  = ?
 WHERE id = ?;`,
 			n.AnsweredBy, n.DurationMs, n.CallStatus, n.Raw, millis(now),
-			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
+			n.FsUUID, n.AccountSid, n.From, n.To, n.Direction,
+			parentOf(n.CallSid, n.ParentCallSid), millis(now), id)
 		if err != nil {
 			return 0, false, fmt.Errorf("store: amd update %d: %w", id, err)
 		}
 	} else {
 		id, err = insertNotified(ctx, tx, n.SipCallID, `INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, amd_answered_by, amd_duration_ms,
-	amd_call_status, amd_notified_at, amd_raw, created_at, updated_at)
-VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?);`,
+	amd_call_status, amd_notified_at, amd_raw, created_at, updated_at, parent_call_sid)
+VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?);`,
 			nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
 			n.From, n.To, n.Direction, millis(now), n.AnsweredBy, n.DurationMs,
-			n.CallStatus, millis(now), n.Raw, millis(now), millis(now))
+			n.CallStatus, millis(now), n.Raw, millis(now), millis(now),
+			parentOf(n.CallSid, n.ParentCallSid))
 		if err != nil {
 			return 0, false, fmt.Errorf("store: amd insert: %w", err)
 		}
@@ -669,6 +683,16 @@ VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?
 // of that dialog later finds the row, unless another row (one with a
 // different CallSid) already holds it.
 const sipCallIDValue = `CASE WHEN ? = '' OR EXISTS (SELECT 1 FROM calls WHERE sip_call_id = ?) THEN NULL ELSE ? END`
+
+// parentOf is the parent CallSid a notification links its call to; a
+// call never parents itself.
+func parentOf(callSid, parent string) string {
+	if parent == callSid {
+		return ""
+	}
+
+	return parent
+}
 
 // insertNotified inserts a notification placeholder row. query's first
 // value is sipCallIDValue; args are the remaining columns' values.
@@ -705,9 +729,10 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 			OR call_sid LIKE ? ESCAPE '\' OR sip_call_id LIKE ? ESCAPE '\'
 			OR fs_uuid LIKE ? ESCAPE '\' OR account_sid LIKE ? ESCAPE '\'
 			OR amd_answered_by LIKE ? ESCAPE '\' OR disp_status LIKE ? ESCAPE '\'
+			OR parent_call_sid LIKE ? ESCAPE '\'
 			OR id IN (SELECT call_id FROM legs WHERE sip_call_id LIKE ? ESCAPE '\'))`
 		like := "%" + escapeLike(f.Query) + "%"
-		args = append(args, like, like, like, like, like, like, like, like, like)
+		args = append(args, like, like, like, like, like, like, like, like, like, like)
 	}
 
 	if f.From != "" {
@@ -750,11 +775,32 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 		limit = 50
 	}
 
-	rows, err := s.db.QueryContext(ctx, callCols+` FROM calls `+where+
+	out, err := s.queryCalls(ctx, "list calls", callCols+` FROM calls `+where+
 		` ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?`,
 		append(args, limit, f.Offset)...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("store: list calls: %w", err)
+		return nil, 0, err
+	}
+
+	return out, total, nil
+}
+
+// DialLegs returns the <Dial> child legs of the call parentCallSid,
+// oldest first.
+func (s *Store) DialLegs(ctx context.Context, parentCallSid string) ([]Call, error) {
+	if parentCallSid == "" {
+		return nil, nil
+	}
+
+	return s.queryCalls(ctx, "list dial legs",
+		callCols+` FROM calls WHERE parent_call_sid = ? ORDER BY started_at, id`, parentCallSid)
+}
+
+// queryCalls runs a callCols query; what names it in errors.
+func (s *Store) queryCalls(ctx context.Context, what, query string, args ...any) ([]Call, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: %s: %w", what, err)
 	}
 
 	defer func() { _ = rows.Close() }()
@@ -764,17 +810,17 @@ func (s *Store) ListCalls(ctx context.Context, f ListFilter) ([]Call, int, error
 	for rows.Next() {
 		c, err := scanCall(rows)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 
 		out = append(out, c)
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("store: list calls rows: %w", err)
+		return nil, fmt.Errorf("store: %s rows: %w", what, err)
 	}
 
-	return out, total, nil
+	return out, nil
 }
 
 const callCols = `SELECT id, COALESCE(sip_call_id,''), COALESCE(call_sid,''), COALESCE(fs_uuid,''),
@@ -783,7 +829,8 @@ const callCols = `SELECT id, COALESCE(sip_call_id,''), COALESCE(call_sid,''), CO
 	amd_notified_at, amd_raw, metadata_json, metadata_xml,
 	disp_status, disp_duration_sec, disp_sip_code, disp_error_code,
 	disp_error_message, disp_notified_at, disp_raw, voiceml_record_json,
-	voiceml_fetched_at, created_at, updated_at,
+	voiceml_fetched_at, created_at, updated_at, parent_call_sid,
+	COALESCE((SELECT p.id FROM calls p WHERE calls.parent_call_sid != '' AND p.call_sid = calls.parent_call_sid), 0),
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id),
 	(SELECT COUNT(*) FROM legs WHERE legs.call_id = calls.id AND legs.write_error != '')`
 
@@ -800,7 +847,7 @@ func scanCall(src interface{ Scan(...any) error }) (Call, error) {
 		&amdAt, &c.AMDRaw, &c.MetadataJSON, &c.MetadataXML,
 		&c.DispStatus, &c.DispDurationSec, &c.DispSipCode, &c.DispErrorCode,
 		&c.DispErrorMessage, &dispAt, &c.DispRaw, &c.VoiceMLRecordJSON, &vmAt,
-		&created, &updated, &c.LegCount, &writeErrLegs); err != nil {
+		&created, &updated, &c.ParentCallSid, &c.ParentID, &c.LegCount, &writeErrLegs); err != nil {
 		return Call{}, fmt.Errorf("store: scan call: %w", err)
 	}
 
@@ -1073,6 +1120,7 @@ type DispositionNotification struct {
 	Direction      string
 	SipCallID      string
 	FsUUID         string
+	ParentCallSid  string // set when CallSid is a <Dial> child leg
 	Raw            string
 }
 
@@ -1140,12 +1188,13 @@ INSERT INTO calls (sip_call_id, call_sid, fs_uuid, account_sid, from_number,
 	to_number, direction, started_at, status, disp_status, disp_duration_sec,
 	disp_sip_code, disp_error_code, disp_error_message, disp_notified_at,
 	disp_raw, amd_answered_by, amd_call_status, amd_notified_at,
-	created_at, updated_at, disp_sequence, disp_event_at)
-VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+	created_at, updated_at, disp_sequence, disp_event_at, parent_call_sid)
+VALUES (`+sipCallIDValue+`, ?, ?, ?, ?, ?, ?, ?, 'notified', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 		nullIfEmpty(n.CallSid), n.FsUUID, n.AccountSid,
 		n.From, n.To, n.Direction, millis(now), n.CallStatus, n.DurationSec,
 		n.SipCode, n.ErrorCode, n.ErrorMessage, millis(now), n.Raw,
-		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now), n.SequenceNumber, millis(n.Timestamp))
+		n.AnsweredBy, n.CallStatus, amdAt, millis(now), millis(now), n.SequenceNumber, millis(n.Timestamp),
+		parentOf(n.CallSid, n.ParentCallSid))
 	if err != nil {
 		return 0, false, fmt.Errorf("store: disposition insert: %w", err)
 	}
@@ -1175,12 +1224,14 @@ UPDATE calls SET
 	from_number = CASE WHEN from_number = '' THEN ? ELSE from_number END,
 	to_number   = CASE WHEN to_number = '' THEN ? ELSE to_number END,
 	direction   = CASE WHEN direction = '' THEN ? ELSE direction END,
+	parent_call_sid = CASE WHEN parent_call_sid = '' THEN ? ELSE parent_call_sid END,
 	updated_at  = ?
 WHERE id = ?;`,
 		n.CallStatus, n.DurationSec, n.SipCode, n.ErrorCode, n.ErrorMessage,
 		n.Raw, millis(now), n.SequenceNumber, millis(n.Timestamp), millis(n.Timestamp),
 		n.AnsweredBy, n.CallStatus, n.AnsweredBy, millis(now),
-		n.FsUUID, n.AccountSid, n.From, n.To, n.Direction, millis(now), id)
+		n.FsUUID, n.AccountSid, n.From, n.To, n.Direction,
+		parentOf(n.CallSid, n.ParentCallSid), millis(now), id)
 	if err != nil {
 		return fmt.Errorf("store: disposition update %d: %w", id, err)
 	}
@@ -1200,6 +1251,9 @@ type VoiceMLRecord struct {
 	Direction   string
 	AnsweredBy  string
 	DurationSec int
+	// ParentCallSid links a <Dial> child leg to its parent; it is how a
+	// Dial-leg AMD callback, which names no parent, gets linked.
+	ParentCallSid string
 }
 
 // SaveVoiceMLRecord stores a Call record fetched from VoiceML
@@ -1220,11 +1274,12 @@ UPDATE calls SET
 	disp_status = CASE WHEN disp_status = '' THEN ? ELSE disp_status END,
 	disp_duration_sec = CASE WHEN disp_duration_sec = 0 THEN ? ELSE disp_duration_sec END,
 	amd_answered_by = CASE WHEN amd_answered_by = '' THEN ? ELSE amd_answered_by END,
+	parent_call_sid = CASE WHEN parent_call_sid = '' THEN ? ELSE parent_call_sid END,
 	updated_at  = ?
 WHERE id = ?;`,
 		prettyJSON, millis(now), rec.AccountSid, nullIfEmpty(rec.Sid),
 		rec.From, rec.To, rec.Direction, rec.Status, rec.DurationSec,
-		rec.AnsweredBy, millis(now), callPK)
+		rec.AnsweredBy, parentOf(rec.Sid, rec.ParentCallSid), millis(now), callPK)
 	if err != nil {
 		return fmt.Errorf("store: save cb record %d: %w", callPK, err)
 	}

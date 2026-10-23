@@ -91,6 +91,8 @@ type callJSON struct {
 	Direction  string          `json:"direction"`
 	AnsweredBy string          `json:"answered_by"`
 	Duration   json.RawMessage `json:"duration"`
+	// ParentCallSid is null on a top-level call.
+	ParentCallSid string `json:"parent_call_sid"`
 }
 
 // FetchCall GETs one Call record. It returns the denormalized subset
@@ -160,6 +162,8 @@ func (c *Client) FetchCall(ctx context.Context, accountSid, apiKey, callSid stri
 		Direction:   parsed.Direction,
 		AnsweredBy:  parsed.AnsweredBy,
 		DurationSec: parseDuration(parsed.Duration),
+
+		ParentCallSid: parsed.ParentCallSid,
 	}
 
 	if rec.Sid == "" {

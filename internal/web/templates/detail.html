@@ -11,6 +11,10 @@
   <dt>Direction</dt><dd>{{.Call.Direction}}</dd>
   <dt>SIP Call-ID</dt><dd><code>{{.Call.SipCallID}}</code></dd>
   <dt>CallSid</dt><dd><code>{{.Call.CallSid}}</code></dd>
+  {{if .Call.ParentCallSid}}
+  <dt>Dialed by</dt>
+  <dd>{{if .Call.ParentID}}<a href="/recordings/{{.Call.ParentID}}"><code>{{.Call.ParentCallSid}}</code></a>{{else}}<code>{{.Call.ParentCallSid}}</code> (not stored here){{end}}</dd>
+  {{end}}
   <dt>FreeSWITCH UUID</dt><dd><code>{{.Call.FsUUID}}</code></dd>
   <dt>AccountSid</dt><dd><code>{{.Call.AccountSid}}</code></dd>
   <dt>AMD disposition</dt>
@@ -32,6 +36,27 @@
     </form>
     {{end}}</dd>
 </dl>
+
+{{if .DialLegs}}
+<h2>Dialed legs</h2>
+<table>
+  <thead>
+    <tr><th>CallSid</th><th>To</th><th>Disposition</th><th>Call duration</th><th>AMD disposition</th><th></th></tr>
+  </thead>
+  <tbody>
+    {{range .DialLegs}}
+    <tr>
+      <td><code>{{.CallSid}}</code></td>
+      <td>{{if .ToNumber}}{{.ToNumber}}{{else}}—{{end}}</td>
+      <td>{{if .DispStatus}}<span class="badge">{{.DispStatus}}</span>{{else}}—{{end}}</td>
+      <td>{{fmtDur .DispDurationSec}}</td>
+      <td>{{if .AMDAnsweredBy}}<span class="badge amd">{{.AMDAnsweredBy}}</span>{{else}}—{{end}}</td>
+      <td><a href="/recordings/{{.ID}}">View</a></td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}
 
 {{if .Call.VoiceMLRecordJSON}}
 <details>

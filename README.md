@@ -305,6 +305,7 @@ JSON:
 | `AccountSid`, `From`, `To`, `CallStatus`, `Direction` | Stored with the disposition; `Caller`/`Called` are accepted as `From`/`To` synonyms |
 | `SipCallId` | The SIPREC recording dialog's SIP Call-ID — direct match |
 | `FsUuid` | The FreeSWITCH parent call UUID — matches the decoded metadata `session_id` |
+| `ParentCallSid` | Not a correlation key. Set on a `<Dial>` child leg's callbacks: the leg is stored as its own call and linked to the parent (see below) |
 
 A request with none of `CallSid`, `SipCallId`, `FsUuid` cannot be
 correlated and is rejected with 400.
@@ -332,6 +333,13 @@ Notifications are upserts, order-independent:
 - A restarted recording (a second SIPREC dialog for the same `CallSid`
   or FreeSWITCH UUID) attaches to the same call: its legs join the
   first dialog's, and the call's duration sums the dialogs.
+- A `<Dial>` child leg is its own call. Its callbacks carry its own
+  `CallSid` plus `ParentCallSid`, the call SIPREC recorded. The leg's
+  row is linked to the parent: the parent's page lists its dialed legs
+  with their outcome and AMD verdict, the list badges the leg, and
+  searching for the parent's CallSid finds both. The Dial-leg AMD
+  callback names no parent; its row is linked once any of the leg's
+  status callbacks arrives, or when its VoiceML record is fetched.
 
 ```sh
 # Form-encoded (the VoiceML/Twilio webhook shape)
@@ -373,7 +381,7 @@ keys, upsert semantics, and response codes as the AMD endpoint, except
 | `SipResponseCode` | Final SIP response code, when the poster knows it |
 | `ErrorCode` / `ErrorMessage` | Failure detail |
 | `AnsweredBy` | Terminal callbacks repeat the AMD verdict; fills the AMD fields when still empty |
-| `CallSid`, `AccountSid`, `From`, `To`, `Direction`, `SipCallId`, `FsUuid` | Same meaning as the AMD endpoint |
+| `CallSid`, `AccountSid`, `From`, `To`, `Direction`, `SipCallId`, `FsUuid`, `ParentCallSid` | Same meaning as the AMD endpoint |
 
 ```sh
 curl -X POST https://srs.example.com/api/notify/disposition \

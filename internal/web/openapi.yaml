@@ -914,6 +914,13 @@ components:
       description: The FreeSWITCH parent call UUID — matches the RS-Metadata session_id.
       format: uuid
       example: 123e4567-e89b-12d3-a456-426614174000
+    ParentCallSidField:
+      type: string
+      description: |
+        Set on a `<Dial>` child leg's callbacks: the CallSid of the call that
+        dialed it. Not a correlation key — the leg is stored as its own call,
+        linked to that parent.
+      example: CA0123456789abcdef0123456789abcd00
     CSRFTokenField:
       type: string
       description: The session's CSRF token (rendered into every authenticated page; bound to the session expiry).
@@ -999,6 +1006,8 @@ components:
           $ref: '#/components/schemas/SipCallIdField'
         FsUuid:
           $ref: '#/components/schemas/FsUuidField'
+        ParentCallSid:
+          $ref: '#/components/schemas/ParentCallSidField'
     DispositionNotifyRequest:
       type: object
       description: |
@@ -1064,6 +1073,8 @@ components:
           $ref: '#/components/schemas/SipCallIdField'
         FsUuid:
           $ref: '#/components/schemas/FsUuidField'
+        ParentCallSid:
+          $ref: '#/components/schemas/ParentCallSidField'
     NotifyResponse:
       type: object
       description: Result of a logged notification.

@@ -30,6 +30,9 @@ import (
 //	CallSid   — matched against a recording whose INVITE Request-URI
 //	            carried ;vm-callsid=CA…
 //
+// ParentCallSid, which rides a <Dial> child leg's callbacks, is not a
+// correlation key: the child is its own call, linked to its parent.
+//
 // Auth is a shared secret (NOTIFY_SECRET): Authorization: Bearer,
 // X-Notify-Secret, or ?secret= (the query form exists for webhook
 // senders like VoiceML's that cannot set custom headers).
@@ -78,6 +81,8 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 		SipCallID:  firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
 		FsUUID:     fields["FsUuid"],
 		Raw:        raw,
+
+		ParentCallSid: fields["ParentCallSid"],
 	}
 
 	id, matched, err := s.Store.ApplyAMD(r.Context(), n)
@@ -157,6 +162,7 @@ func (s *Server) handleNotifyDisposition(w http.ResponseWriter, r *http.Request)
 		Direction:      fields["Direction"],
 		SipCallID:      firstNonEmpty(fields["SipCallId"], fields["SipCallID"]),
 		FsUUID:         fields["FsUuid"],
+		ParentCallSid:  fields["ParentCallSid"],
 		Raw:            raw,
 	}
 
@@ -243,6 +249,7 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 				"sip_response_code": "SipResponseCode",
 				"error_code":        "ErrorCode", "error_message": "ErrorMessage",
 				"sequence_number": "SequenceNumber", "timestamp": "Timestamp",
+				"parent_call_sid": "ParentCallSid",
 			}
 			for k, canon := range alias {
 				if v, ok := fields[k]; ok && fields[canon] == "" {

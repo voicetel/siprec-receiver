@@ -356,7 +356,8 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 type detailData struct {
 	baseData
-	Call *store.Call
+	Call     *store.Call
+	DialLegs []store.Call
 }
 
 func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +382,15 @@ func (s *Server) handleDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.render(w, "detail.html", detailData{baseData: s.base(r), Call: call})
+	legs, err := s.Store.DialLegs(r.Context(), call.CallSid)
+	if err != nil {
+		log.Printf("[web] dial legs of call %d: %v", id, err)
+		http.Error(w, "failed to load recording", http.StatusInternalServerError)
+
+		return
+	}
+
+	s.render(w, "detail.html", detailData{baseData: s.base(r), Call: call, DialLegs: legs})
 }
 
 // handleAudio streams one leg's WAV. http.ServeContent provides the

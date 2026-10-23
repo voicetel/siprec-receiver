@@ -206,6 +206,19 @@ curl -u "AC…:$AUTH" "$VOICEML_API/2010-04-01/Accounts/AC…/Calls.json" \
   --data-urlencode "StatusCallback=https://srs.example.com/api/notify/disposition?secret=$NOTIFY_SECRET"
 ```
 
+To capture the dialed party's outcome too, point the `<Number>`'s
+`statusCallback` (and `amdStatusCallback` with `machineDetection`) at
+the same URLs. Each dialed leg is stored as its own call, linked to
+the recorded call by its `ParentCallSid`:
+
+```xml
+<Dial>
+  <Number statusCallback="https://srs.example.com/api/notify/disposition?secret=$NOTIFY_SECRET"
+          machineDetection="Enable"
+          amdStatusCallback="https://srs.example.com/api/notify/amd?secret=$NOTIFY_SECRET">+15550001111</Number>
+</Dial>
+```
+
 For inbound calls, set the phone number's **StatusCallback** to the
 disposition URL above. A callback configured for more events than
 `completed` is fine: the receiver orders events by `SequenceNumber`

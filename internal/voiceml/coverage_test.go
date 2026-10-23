@@ -125,18 +125,18 @@ func TestFetchCall_WrongFieldType(t *testing.T) {
 }
 
 func TestFetchCall_FillsMissingIdentifiers(t *testing.T) {
-	srv := jsonServer(t, `{"status":"busy","duration":null}`)
+	srv := jsonServer(t, `{"status":"busy","duration":null,"parent_call_sid":null}`)
 
 	rec, pretty, err := New(srv.URL).FetchCall(context.Background(), "ACffffffffffffffffffffffffffffffff", "k", "CAffffffffffffffffffffffffffffffff")
 	if err != nil {
 		t.Fatalf("FetchCall: %v", err)
 	}
 
-	if rec.Sid != "CAffffffffffffffffffffffffffffffff" || rec.AccountSid != "ACffffffffffffffffffffffffffffffff" || rec.Status != "busy" || rec.DurationSec != 0 {
+	if rec.Sid != "CAffffffffffffffffffffffffffffffff" || rec.AccountSid != "ACffffffffffffffffffffffffffffffff" || rec.Status != "busy" || rec.DurationSec != 0 || rec.ParentCallSid != "" {
 		t.Errorf("record = %+v", rec)
 	}
 
-	if pretty != "{\n  \"duration\": null,\n  \"status\": \"busy\"\n}" {
+	if pretty != "{\n  \"duration\": null,\n  \"parent_call_sid\": null,\n  \"status\": \"busy\"\n}" {
 		t.Errorf("pretty = %q", pretty)
 	}
 }

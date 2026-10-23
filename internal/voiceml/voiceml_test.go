@@ -23,7 +23,8 @@ func TestFetchCall_TwilioShape(t *testing.T) {
 			"from": "+12165285911", "to": "+12085179911",
 			"status": "completed", "direction": "outbound-api",
 			"answered_by": "machine_end_beep", "duration": "62",
-			"price": "-0.02000", "price_unit": "USD"
+			"price": "-0.02000", "price_unit": "USD",
+			"parent_call_sid": "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		}`))
 	}))
 	defer srv.Close()
@@ -44,7 +45,8 @@ func TestFetchCall_TwilioShape(t *testing.T) {
 	}
 
 	if rec.Status != "completed" || rec.DurationSec != 62 ||
-		rec.AnsweredBy != "machine_end_beep" || rec.From != "+12165285911" {
+		rec.AnsweredBy != "machine_end_beep" || rec.From != "+12165285911" ||
+		rec.ParentCallSid != "CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
 		t.Errorf("record = %+v", rec)
 	}
 

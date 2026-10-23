@@ -177,6 +177,7 @@ type mergeRow struct {
 	dispSeq                                         sql.NullInt64
 	vmJSON                                          string
 	vmAt                                            int64
+	parentCallSid                                   string
 }
 
 func loadMergeRow(ctx context.Context, tx *sql.Tx, id int64) (mergeRow, error) {
@@ -187,12 +188,12 @@ func loadMergeRow(ctx context.Context, tx *sql.Tx, id int64) (mergeRow, error) {
 		started_at, ended_at, amd_answered_by, amd_call_status, amd_raw, amd_duration_ms,
 		amd_notified_at, metadata_json, metadata_xml, disp_status, disp_error_code,
 		disp_error_message, disp_raw, disp_duration_sec, disp_sip_code, disp_notified_at,
-		disp_event_at, disp_sequence, voiceml_record_json, voiceml_fetched_at
+		disp_event_at, disp_sequence, voiceml_record_json, voiceml_fetched_at, parent_call_sid
 		FROM calls WHERE id = ?`, id).Scan(&r.sipCallID, &r.callSid, &r.fsUUID, &r.accountSid,
 		&r.fromURI, &r.fromNumber, &r.toNumber, &r.direction, &r.status, &r.startedAt,
 		&r.endedAt, &r.amdBy, &r.amdStatus, &r.amdRaw, &r.amdDurMs, &r.amdAt, &r.metaJSON,
 		&r.metaXML, &r.dispStatus, &r.dispErrCode, &r.dispErrMsg, &r.dispRaw, &r.dispDur,
-		&r.dispSip, &r.dispAt, &r.dispEventAt, &r.dispSeq, &r.vmJSON, &r.vmAt)
+		&r.dispSip, &r.dispAt, &r.dispEventAt, &r.dispSeq, &r.vmJSON, &r.vmAt, &r.parentCallSid)
 	if err != nil {
 		return mergeRow{}, fmt.Errorf("store: load call %d: %w", id, err)
 	}
@@ -240,6 +241,7 @@ func mergeCalls(ctx context.Context, tx *sql.Tx, keepID, dropID int64) error {
 	m.fromURI, m.fromNumber = fill(keep.fromURI, drop.fromURI), fill(keep.fromNumber, drop.fromNumber)
 	m.toNumber, m.direction = fill(keep.toNumber, drop.toNumber), fill(keep.direction, drop.direction)
 	m.metaJSON, m.metaXML = fill(keep.metaJSON, drop.metaJSON), fill(keep.metaXML, drop.metaXML)
+	m.parentCallSid = fill(keep.parentCallSid, drop.parentCallSid)
 	m.startedAt = mergedStart(keep, drop)
 	m.endedAt = max(keep.endedAt, drop.endedAt)
 
@@ -268,7 +270,7 @@ func mergeCalls(ctx context.Context, tx *sql.Tx, keepID, dropID int64) error {
 		metadata_json = ?, metadata_xml = ?, disp_status = ?, disp_error_code = ?,
 		disp_error_message = ?, disp_raw = ?, disp_duration_sec = ?, disp_sip_code = ?,
 		disp_notified_at = ?, disp_event_at = ?, disp_sequence = ?,
-		voiceml_record_json = ?, voiceml_fetched_at = ?, updated_at = ?
+		voiceml_record_json = ?, voiceml_fetched_at = ?, parent_call_sid = ?, updated_at = ?
 		WHERE id = ?`,
 		nullIfEmpty(m.sipCallID), nullIfEmpty(m.callSid), m.fsUUID, m.accountSid, m.fromURI,
 		m.fromNumber, m.toNumber, m.direction, m.status, m.startedAt, m.endedAt,
@@ -276,7 +278,7 @@ func mergeCalls(ctx context.Context, tx *sql.Tx, keepID, dropID int64) error {
 		m.metaJSON, m.metaXML, m.dispStatus, m.dispErrCode,
 		m.dispErrMsg, m.dispRaw, m.dispDur, m.dispSip,
 		m.dispAt, m.dispEventAt, m.dispSeq,
-		m.vmJSON, m.vmAt, millis(time.Now().UTC()), keepID)
+		m.vmJSON, m.vmAt, m.parentCallSid, millis(time.Now().UTC()), keepID)
 	if err != nil {
 		return fmt.Errorf("store: merge call %d into %d: %w", dropID, keepID, err)
 	}
