@@ -193,7 +193,9 @@ CallSid's hex digits, not the literal `CA…` channel UUID FreeSWITCH
 shows.
 
 Send AMD and the final status to siprec-receiver (`?secret=` because
-VoiceML's webhook sender cannot set headers):
+VoiceML's webhook sender cannot set headers). Either callback method
+works; with `StatusCallbackMethod=GET` the fields arrive as the query
+string:
 
 ```sh
 curl -u "AC…:$AUTH" "$VOICEML_API/2010-04-01/Accounts/AC…/Calls.json" \

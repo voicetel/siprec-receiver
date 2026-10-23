@@ -10,11 +10,11 @@ info:
 
     Two audiences share one listener:
 
-    * **Machines** — `POST /api/notify/amd` and `POST /api/notify/disposition`
-      log the AMD (answering-machine detection) verdict and the final call
-      outcome for a call, authenticated with a shared secret. Field names are
-      the ones VoiceML posts to an AsyncAmdStatusCallback / StatusCallback
-      URL, so existing webhook senders work unmodified.
+    * **Machines** — `/api/notify/amd` and `/api/notify/disposition` log the
+      AMD (answering-machine detection) verdict and the final call outcome
+      for a call, authenticated with a shared secret. Field names are the
+      ones VoiceML sends to an AsyncAmdStatusCallback / StatusCallback URL,
+      by POST or GET, so existing webhook senders work unmodified.
     * **People** — the web UI under `/recordings` and `/admin`, authenticated
       with Google OAuth and an allowlist (see the `SessionCookie` scheme).
 
@@ -146,6 +146,47 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/NotifyDisabled'
+    get:
+      tags:
+        - Notify
+      operationId: getNotifyAMD
+      summary: Log an AMD disposition sent by a GET callback
+      description: |
+        The same notification from a webhook whose method is GET
+        (`StatusCallbackMethod=GET`): the AMD fields arrive as the query
+        string, one parameter each. Authentication (the `secret` query
+        parameter included), correlation and responses are the POST's. The
+        query, without `secret`, is kept as the raw payload.
+      security:
+        - NotifySecret: []
+      parameters:
+        - name: fields
+          in: query
+          required: true
+          description: The AMD fields as query parameters.
+          style: form
+          explode: true
+          schema:
+            $ref: '#/components/schemas/AMDNotifyRequest'
+          example:
+            CallSid: CA0123456789abcdef0123456789abcdef
+            AnsweredBy: machine_end_beep
+            MachineDetectionDuration: 3100
+      responses:
+        '200':
+          description: AMD disposition from a GET callback logged. `matched` reports whether a recording row already existed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotifyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotifyDisabled'
   /api/notify/disposition:
     post:
       tags:
@@ -185,6 +226,48 @@ paths:
       responses:
         '200':
           description: Disposition logged. `matched` reports whether a recording row already existed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotifyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/NotifyDisabled'
+    get:
+      tags:
+        - Notify
+      operationId: getNotifyDisposition
+      summary: Log a final call disposition sent by a GET callback
+      description: |
+        The same notification from a webhook whose method is GET
+        (`StatusCallbackMethod=GET`): the disposition fields arrive as the query
+        string, one parameter each. Authentication (the `secret` query
+        parameter included), correlation and responses are the POST's. The
+        query, without `secret`, is kept as the raw payload.
+      security:
+        - NotifySecret: []
+      parameters:
+        - name: fields
+          in: query
+          required: true
+          description: The disposition fields as query parameters.
+          style: form
+          explode: true
+          schema:
+            $ref: '#/components/schemas/DispositionNotifyRequest'
+          example:
+            CallSid: CA0123456789abcdef0123456789abcdef
+            CallStatus: completed
+            CallDuration: 62
+            SequenceNumber: 3
+      responses:
+        '200':
+          description: Disposition from a GET callback logged. `matched` reports whether a recording row already existed.
           content:
             application/json:
               schema:

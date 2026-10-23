@@ -293,9 +293,11 @@ without needing the recording dialog's SIP Call-ID.
 the answering-machine verdict produced during dialing (by VoiceML,
 a dialer, or any AMD engine) ends up on the same record as the audio.
 
-It accepts the exact field names VoiceML POSTs to an
-`AsyncAmdStatusCallback` URL, as form-encoding (the webhook shape) or
-JSON:
+It accepts the exact field names VoiceML sends to an
+`AsyncAmdStatusCallback` URL, as a form-encoded (the webhook shape) or
+JSON `POST`, or as the query string of a `GET` (a callback configured
+with `StatusCallbackMethod=GET`; the query, minus `secret`, is kept as
+the raw payload):
 
 | Field | Notes |
 |---|---|

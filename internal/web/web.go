@@ -150,8 +150,12 @@ func (s *Server) Handler() http.Handler {
 		_, _ = w.Write([]byte(redocPage))
 	})
 
-	mux.HandleFunc("POST /api/notify/amd", s.handleNotifyAMD)
-	mux.HandleFunc("POST /api/notify/disposition", s.handleNotifyDisposition)
+	// GET too: a webhook sender configured with StatusCallbackMethod=GET
+	// sends its fields as the query string.
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		mux.HandleFunc(method+" /api/notify/amd", s.handleNotifyAMD)
+		mux.HandleFunc(method+" /api/notify/disposition", s.handleNotifyDisposition)
+	}
 
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.Handle("GET /auth/login", http.HandlerFunc(s.Auth.HandleLogin))

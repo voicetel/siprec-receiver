@@ -18,10 +18,11 @@ import (
 // handleNotifyAMD is the call-notification endpoint: it logs the AMD
 // (answering-machine detection) disposition for a call.
 //
-// It accepts the exact form field names VoiceML POSTs to an
+// It accepts the exact form field names VoiceML sends to an
 // AsyncAmdStatusCallback URL (CallSid, AccountSid, AnsweredBy,
 // MachineDetectionDuration, From, To, CallStatus, Direction, Caller,
-// Called, ApiVersion) as form-encoding or JSON, plus the SIPREC
+// Called, ApiVersion) as a form-encoded or JSON POST, or as a GET's
+// query string (a callback whose method is GET), plus the SIPREC
 // correlation keys a poster that knows them can add:
 //
 //	SipCallId — the SIPREC recording dialog's SIP Call-ID
@@ -107,7 +108,7 @@ func (s *Server) handleNotifyAMD(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleNotifyDisposition is the final-outcome companion to
-// handleNotifyAMD: POST /api/notify/disposition logs what ultimately
+// handleNotifyAMD: /api/notify/disposition logs what ultimately
 // happened to the call (the StatusCallback "completed" event's
 // content). Same auth, body shapes, and correlation keys as the AMD
 // endpoint; CallStatus is required instead of AnsweredBy. A
@@ -220,9 +221,16 @@ func (s *Server) notifyAuthorized(r *http.Request) bool {
 }
 
 // parseNotifyBody accepts JSON or form-encoding (VoiceML/Twilio
-// webhooks are form-encoded) and returns a canonical field map plus
-// the raw body kept for audit display.
+// webhooks are form-encoded), or for GET the query string, and returns
+// a canonical field map plus the raw payload kept for audit display.
 func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
+	if r.Method == http.MethodGet {
+		query := r.URL.Query()
+		query.Del("secret")
+
+		return firstValues(query), query.Encode()
+	}
+
 	fields := map[string]string{}
 
 	ct := r.Header.Get("Content-Type")
@@ -264,11 +272,7 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 	// Form-encoded body (already read by the handler, so parse from
 	// the bytes rather than r.ParseForm).
 	form, _ := url.ParseQuery(string(body))
-	for k, vs := range form {
-		if len(vs) > 0 {
-			fields[k] = vs[0]
-		}
-	}
+	fields = firstValues(form)
 
 	// Query parameters double as fields for GET-style webhook senders.
 	for k, vs := range r.URL.Query() {
@@ -282,6 +286,19 @@ func parseNotifyBody(r *http.Request, body []byte) (map[string]string, string) {
 	}
 
 	return fields, string(body)
+}
+
+// firstValues keeps each key's first value.
+func firstValues(values url.Values) map[string]string {
+	fields := make(map[string]string, len(values))
+
+	for k, vs := range values {
+		if len(vs) > 0 {
+			fields[k] = vs[0]
+		}
+	}
+
+	return fields
 }
 
 // dispositionTimeLayouts are the Timestamp shapes accepted: RFC 3339
