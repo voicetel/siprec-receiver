@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: siprec-receiver API
-  version: 0.2.0
+  version: 0.3.0
   summary: SIPREC recording server — notification API and web UI
   description: |
     siprec-receiver is a SIPREC Session Recording Server (SRS). FreeSWITCH
