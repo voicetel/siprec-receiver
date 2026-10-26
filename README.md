@@ -161,6 +161,13 @@ verified against Google on every login, the email must be verified,
 and it must then be authorized (see [Web UI and roles](#web-ui-and-roles))
 — a Google account alone never grants access.
 
+> **Using VoiceML?** See
+> [Recording VoiceML calls with siprec-receiver](docs/voiceml.md)
+> for the connector setup, inbound/outbound examples, and the
+> specific difference between **receiving** AMD/final-disposition
+> callbacks in siprec-receiver and **proxying** them when your own
+> application must receive them too.
+
 ## SRC integration (mod_siprec)
 
 In FreeSWITCH `autoload_configs/siprec.conf.xml`:

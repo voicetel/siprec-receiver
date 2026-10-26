@@ -192,20 +192,74 @@ For outbound calls, the stored `fs_uuid` is the dashed form of the
 CallSid's hex digits, not the literal `CA…` channel UUID FreeSWITCH
 shows.
 
-Send AMD and the final status to siprec-receiver. VoiceML's webhook
-sender cannot set headers, so authorize the callbacks one of two ways:
+## Receiving AMD and final dispositions
+
+### The key distinction: siprec-receiver receives; it does not relay
+
+siprec-receiver is a **terminal consumer** for these callbacks. It
+validates one, stores it, merges it with the recording identified by
+`CallSid`, and returns JSON such as `{"id":42,"matched":true}`. It
+has no “forward to my application” setting and never makes an
+outbound webhook to your application.
+
+That matters because VoiceML has one configured destination for each
+callback kind on a call (and one per `<Number>` leg):
+
+- If VoiceML should deliver the outcome **only to siprec-receiver**,
+  point VoiceML directly at siprec-receiver (direct receiving below).
+- If your application **also** needs the same AMD or status callback,
+  do not point VoiceML only at siprec-receiver. Put your application
+  or a small proxy in the VoiceML callback path and have that first
+  recipient send a copy to siprec-receiver (proxying below).
+
+Do not confuse these three callback families:
+
+| Callback | VoiceML setting | Sent to siprec-receiver? | Meaning |
+|---|---|---|---|
+| AMD verdict | `AsyncAmdStatusCallback`; `<Number amdStatusCallback>` | `POST` or `GET /api/notify/amd` | `human`, `machine_*`, `fax`, etc. |
+| Final call disposition | `StatusCallback`; `<Number statusCallback>` | `POST` or `GET /api/notify/disposition` | `completed`, `busy`, `no-answer`, `failed`, duration, SIP/error detail |
+| SIPREC lifecycle | `<Siprec statusCallback>` / REST `StatusCallback` on the Siprec resource | **No** | `siprec-started` / `siprec-error` for the recording fork itself; send this to your application or omit it |
+
+AMD is an answering-party classification delivered while the call is
+in progress. Disposition is the call's eventual outcome. They are
+separate events and normally arrive at different times.
+
+### Option A — direct receiving (siprec-receiver only)
+
+Use this when no other system needs VoiceML's AMD/status callbacks:
+
+```text
+VoiceML ──AMD────────► https://srs.example.com/api/notify/amd
+        └─status─────► https://srs.example.com/api/notify/disposition
+                              │
+                              ▼
+                    stored + merged with recording
+```
+
+VoiceML ignores the JSON body on these asynchronous callbacks; the
+body is for logs, tests, and other machine senders. The recording and
+notifications can arrive in either order. A notification that arrives
+first creates a searchable AMD/disposition-only row; the recording
+adopts it when the SIPREC dialog is finalized.
+
+Authorize direct VoiceML callbacks in either of two ways:
 
 - **Signature (recommended):** store the account's API key under
   **Integrations** in siprec-receiver and set `PUBLIC_BASE_URL` to the
   exact `https://` origin the callback URLs use. VoiceML signs every
-  callback with that key (`X-Twilio-Signature`), so the URLs need no
-  secret and nothing sensitive lands in access logs. A signed callback
-  can only update its own account's calls.
-- **`?secret=`:** append the notify secret to each callback URL, as
-  below.
+  form/GET callback with that key (`X-Twilio-Signature`), so the URLs
+  need no secret and nothing sensitive lands in access logs. The
+  callback must carry its `AccountSid`; a signed callback can only
+  update that account's calls. JSON bodies cannot use this signature
+  scheme. `NOTIFY_SECRET` must still be set: it is the master switch
+  that enables both notify endpoints.
+- **Shared secret:** append `?secret=$NOTIFY_SECRET` to each callback
+  URL, as below, because VoiceML's webhook sender cannot set an
+  `Authorization` header. The secret can then appear in access and
+  proxy logs, so prefer signatures where possible.
 
-Either callback method works; with `StatusCallbackMethod=GET` the
-fields arrive as the query string:
+Either callback method works as POST or GET. With
+`StatusCallbackMethod=GET`, the fields arrive as the query string:
 
 ```sh
 curl -u "AC…:$AUTH" "$VOICEML_API/2010-04-01/Accounts/AC…/Calls.json" \
@@ -215,13 +269,16 @@ curl -u "AC…:$AUTH" "$VOICEML_API/2010-04-01/Accounts/AC…/Calls.json" \
   --data-urlencode "MachineDetection=Enable" \
   --data-urlencode "AsyncAmd=true" \
   --data-urlencode "AsyncAmdStatusCallback=https://srs.example.com/api/notify/amd?secret=$NOTIFY_SECRET" \
-  --data-urlencode "StatusCallback=https://srs.example.com/api/notify/disposition?secret=$NOTIFY_SECRET"
+  --data-urlencode "StatusCallback=https://srs.example.com/api/notify/disposition?secret=$NOTIFY_SECRET" \
+  --data-urlencode "StatusCallbackEvent=completed"
 ```
 
 To capture the dialed party's outcome too, point the `<Number>`'s
 `statusCallback` (and `amdStatusCallback` with `machineDetection`) at
-the same URLs. Each dialed leg is stored as its own call, linked to
-the recorded call by its `ParentCallSid`:
+the same endpoint pair. Each dialed leg is stored as its own call,
+linked to the recorded call by its `ParentCallSid`; preserve
+`ParentCallSid` exactly and do not use it as the child's own
+correlation key:
 
 ```xml
 <Dial>
@@ -238,6 +295,133 @@ and `Timestamp`, ignores late or duplicate ones, and never lets a
 progress event (`ringing`, `in-progress`) replace a final outcome.
 The call's billable length is read from `CallDuration` (seconds);
 `Duration` (whole minutes) is ignored.
+
+Expected receiver responses are:
+
+| Result | Meaning |
+|---|---|
+| `200 {"id":…,"matched":true}` | An existing call row was updated |
+| `200 {"id":…,"matched":false}` | A notification-only row was created; a later recording can adopt it |
+| `400` | Required field missing (`AnsweredBy` or `CallStatus`), or no `CallSid`/`SipCallId`/`FsUuid` correlation key |
+| `401` | Neither a valid shared secret nor a valid account signature |
+| `403` | A signed callback tried to touch another account's call |
+| `503` | `NOTIFY_SECRET` is unset, so both notify endpoints are disabled |
+
+### Option B — proxying (your application also needs them)
+
+Use this when the application that receives VoiceML callbacks today
+must keep receiving them. VoiceML sends each callback once, to the
+configured URL; the first recipient is responsible for fan-out:
+
+```text
+                         ┌──── copy (Bearer NOTIFY_SECRET) ───► siprec-receiver
+VoiceML ──► app or proxy ┤
+                         └──── original callback ─────────────► your application
+```
+
+There are two equivalent implementations.
+
+#### B1. Let the application forward a copy
+
+Keep the existing application URLs in VoiceML. In the application's
+AMD and status handlers:
+
+1. Validate and process the VoiceML callback exactly as today.
+2. Send a server-side copy of **all original fields** to the matching
+   siprec-receiver endpoint (`/amd` for AMD, `/disposition` for
+   status), using `Authorization: Bearer $NOTIFY_SECRET`.
+3. Return the application's original response to VoiceML.
+
+Make the copy with a short timeout (for example 2 seconds), log a
+non-2xx result, and do not fail the VoiceML callback solely because
+siprec-receiver is unavailable — unless your recording-compliance
+policy explicitly requires failing closed. If the copy must never be
+lost, write it to the application's durable outbox/queue and retry
+from a worker. The receiver's upserts are idempotent, and duplicate
+dispositions are ordered, so a retried copy is safe.
+
+Do not ask siprec-receiver to validate the copy using VoiceML's
+original `X-Twilio-Signature` unless the proxy is transparent at the
+same public origin and path. Signature validation reconstructs
+`PUBLIC_BASE_URL + /api/notify/…`; a callback signed for
+`https://app.example.com/callbacks/amd` will not verify as though it
+had been sent to the receiver's notify URL. The proxy-to-receiver hop
+therefore has its own machine credential: the Bearer secret.
+
+#### B2. Mirror at an edge proxy
+
+If the application cannot be changed, put a proxy in front of its
+callback URLs and mirror each request to the receiver. An NGINX
+sketch (one location per callback kind, so AMD and disposition are
+never crossed):
+
+```nginx
+location = /callbacks/amd {
+    mirror /_srs_amd;
+    proxy_pass https://app.example.com;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+}
+
+location = /_srs_amd {
+    internal;
+    proxy_pass https://srs.example.com/api/notify/amd;
+    proxy_set_header Authorization "Bearer NOTIFY_SECRET";
+    proxy_http_version 1.1;
+}
+
+location = /callbacks/disposition {
+    mirror /_srs_disposition;
+    proxy_pass https://app.example.com;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_http_version 1.1;
+}
+
+location = /_srs_disposition {
+    internal;
+    proxy_pass https://srs.example.com/api/notify/disposition;
+    proxy_set_header Authorization "Bearer NOTIFY_SECRET";
+    proxy_http_version 1.1;
+}
+```
+
+Then configure VoiceML with the **proxy's** public URLs
+(`https://proxy.example.com/callbacks/amd` and
+`https://proxy.example.com/callbacks/disposition`). The application's
+response remains the response VoiceML sees; the mirrored copy's
+response is ignored. Preserve the original method, query string, and
+every form field — especially `CallSid`, `AccountSid`,
+`ParentCallSid`, `SequenceNumber`, `Timestamp`, and `CallDuration`.
+Your application must validate `X-Twilio-Signature` against the
+public proxy URL it was configured with, which is why the proxy
+forwards the original `Host`.
+
+### End-to-end checks
+
+1. Simulate one callback against the receiver (replace the IDs with a
+   real test call's):
+
+   ```sh
+   curl -i https://srs.example.com/api/notify/amd \
+     -H "Authorization: Bearer $NOTIFY_SECRET" \
+     --data-urlencode "CallSid=CA…" \
+     --data-urlencode "AccountSid=AC…" \
+     --data-urlencode "AnsweredBy=machine_end_beep" \
+     --data-urlencode "MachineDetectionDuration=3100"
+   # → {"id":…,"matched":true|false}
+   ```
+
+2. Place a recorded VoiceML call with AMD enabled. Confirm, in any
+   arrival order: the WAV is playable, the call page shows the AMD
+   badge, and after hangup its outcome and call duration are set.
+3. In proxy mode, stop siprec-receiver and place another test call.
+   The application must still receive its callback; only the proxy's
+   copy may fail. Restart the receiver and confirm normal calls merge
+   again.
 
 ## Troubleshooting
 
