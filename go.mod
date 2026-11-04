@@ -8,7 +8,7 @@ require (
 	github.com/emiago/sipgo v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.52
 	golang.org/x/oauth2 v0.37.0
-	google.golang.org/api v0.304.0
+	google.golang.org/api v0.308.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
