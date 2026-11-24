@@ -111,12 +111,10 @@ func TestDeleteCallFailures(t *testing.T) {
 	t.Run("leg path rows", func(t *testing.T) {
 		s := openTestStore(t)
 		id := recordSimpleLeg(t, s, "dlg-lr", time.Now())
-		addBoom(t, s)
-		mustExec(t, s, `ALTER TABLE legs RENAME TO legs_real`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT legs_real.id, call_id, abs(boom.x) AS wav_path FROM legs_real, boom`)
+		failRowsWhen(t, s, "SELECT wav_path FROM legs WHERE call_id = ?")
 
 		_, err := s.DeleteCall(ctx, id)
-		wantErr(t, err, "leg paths rows")
+		wantRowsErr(t, err, "leg paths rows")
 	})
 
 	t.Run("commit", func(t *testing.T) {

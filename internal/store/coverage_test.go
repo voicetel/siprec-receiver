@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"math"
@@ -102,14 +104,80 @@ func failCommits(t *testing.T, s *Store) {
 	})
 }
 
-// addBoom creates a one-row table whose value makes abs() raise
-// "integer overflow" at step time, for views that must fail
-// mid-iteration rather than at prepare time.
+// addBoom creates a one-row table whose value makes abs() overflow
+// during statement execution.
 func addBoom(t *testing.T, s *Store) {
 	t.Helper()
 
 	mustExec(t, s, `CREATE TABLE boom (x INTEGER)`)
 	mustExec(t, s, `INSERT INTO boom VALUES (?)`, int64(math.MinInt64))
+}
+
+var errRowIteration = errors.New("injected row iteration failure")
+
+type rowErrorConnector struct {
+	dsn, queryFragment string
+}
+
+func (c rowErrorConnector) Driver() driver.Driver { return &sqlite3.SQLiteDriver{} }
+
+func (c rowErrorConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := c.Driver().Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	return rowErrorConn{SQLiteConn: conn.(*sqlite3.SQLiteConn), queryFragment: c.queryFragment}, nil
+}
+
+type rowErrorConn struct {
+	*sqlite3.SQLiteConn
+	queryFragment string
+}
+
+func (c rowErrorConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	rows, err := c.SQLiteConn.QueryContext(ctx, query, args)
+	if err != nil || !strings.Contains(query, c.queryFragment) {
+		return rows, err
+	}
+
+	return rowErrorRows{Rows: rows}, nil
+}
+
+type rowErrorRows struct{ driver.Rows }
+
+func (rowErrorRows) Next([]driver.Value) error { return errRowIteration }
+
+// failRowsWhen leaves query setup to SQLite and injects an error at
+// iteration time. go-sqlite3 can step eagerly, so a SQL expression
+// that fails on the first row is not a reliable rows.Err fixture.
+func failRowsWhen(t *testing.T, s *Store, queryFragment string) {
+	t.Helper()
+
+	var path string
+	if err := s.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db := sql.OpenDB(rowErrorConnector{
+		dsn:           path + "?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on",
+		queryFragment: queryFragment,
+	})
+	db.SetMaxOpenConns(1)
+	s.db = db
+}
+
+func wantRowsErr(t *testing.T, err error, substr string) {
+	t.Helper()
+
+	wantErr(t, err, substr)
+	if !errors.Is(err, errRowIteration) {
+		t.Fatalf("err = %v, want wrapped %v", err, errRowIteration)
+	}
 }
 
 func closedStore(t *testing.T) *Store {
@@ -683,12 +751,10 @@ func TestListCalls_FailuresAfterCount(t *testing.T) {
 	t.Run("rows", func(t *testing.T) {
 		s := openTestStore(t)
 		recordSimpleLeg(t, s, "dlg-r", time.Now())
-		addBoom(t, s)
-		mustExec(t, s, `DROP TABLE legs`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT calls.id AS call_id, abs(boom.x) AS write_error, 0 AS no_audio FROM calls, boom`)
+		failRowsWhen(t, s, "ORDER BY started_at DESC, id DESC LIMIT")
 
 		_, _, err := s.ListCalls(context.Background(), ListFilter{})
-		wantErr(t, err, "list calls rows")
+		wantRowsErr(t, err, "list calls rows")
 	})
 }
 
@@ -748,13 +814,10 @@ func TestGetCall_Paths(t *testing.T) {
 	t.Run("legs rows", func(t *testing.T) {
 		s := openTestStore(t)
 		id := recordSimpleLeg(t, s, "dlg-lr", time.Now())
-		addBoom(t, s)
-		mustExec(t, s, `ALTER TABLE legs RENAME TO legs_real`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT legs_real.id, call_id, label, codec, participant_aor,
-			wav_path, duration_sec, write_error, no_audio, abs(boom.x) AS created_at FROM legs_real, boom`)
+		failRowsWhen(t, s, "FROM legs WHERE call_id = ? ORDER BY id")
 
 		_, err := s.GetCall(ctx, id)
-		wantErr(t, err, "legs rows")
+		wantRowsErr(t, err, "legs rows")
 	})
 }
 
@@ -851,7 +914,7 @@ func TestListFunctions_ScanAndRowsFailures(t *testing.T) {
 		name    string
 		seed    func(t *testing.T, s *Store)
 		table   string
-		view    string // replacement view over <table>_real and boom
+		query   string
 		list    func(s *Store) error
 		scanErr string
 		rowsErr string
@@ -865,9 +928,8 @@ func TestListFunctions_ScanAndRowsFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			table: "users",
-			view: `SELECT email, role, created_by, abs(boom.x) AS created_at, disabled,
-				google_sub, session_epoch FROM users_real, boom`,
+			table:   "users",
+			query:   "FROM users ORDER BY email",
 			list:    func(s *Store) error { _, err := s.ListUsers(ctx); return err },
 			scanErr: "scan user", rowsErr: "list users rows",
 		},
@@ -878,9 +940,8 @@ func TestListFunctions_ScanAndRowsFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			table: "voiceml_accounts",
-			view: `SELECT account_sid, api_key, created_by, abs(boom.x) AS created_at, updated_at
-				FROM voiceml_accounts_real, boom`,
+			table:   "voiceml_accounts",
+			query:   "FROM voiceml_accounts ORDER BY account_sid",
 			list:    func(s *Store) error { _, err := s.ListVoiceMLAccounts(ctx); return err },
 			scanErr: "scan cb account", rowsErr: "list cb accounts rows",
 		},
@@ -891,9 +952,8 @@ func TestListFunctions_ScanAndRowsFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			table: "audit_log",
-			view: `SELECT audit_log_real.id, actor, action, target, detail, abs(boom.x) AS created_at
-				FROM audit_log_real, boom`,
+			table:   "audit_log",
+			query:   "FROM audit_log ORDER BY id DESC",
 			list:    func(s *Store) error { _, err := s.ListAudit(ctx, 10_000); return err },
 			scanErr: "scan audit", rowsErr: "list audit rows",
 		},
@@ -910,10 +970,8 @@ func TestListFunctions_ScanAndRowsFailures(t *testing.T) {
 		t.Run(tc.name+"/rows", func(t *testing.T) {
 			s := openTestStore(t)
 			tc.seed(t, s)
-			addBoom(t, s)
-			mustExec(t, s, `ALTER TABLE `+tc.table+` RENAME TO `+tc.table+`_real`)
-			mustExec(t, s, `CREATE VIEW `+tc.table+` AS `+tc.view)
-			wantErr(t, tc.list(s), tc.rowsErr)
+			failRowsWhen(t, s, tc.query)
+			wantRowsErr(t, tc.list(s), tc.rowsErr)
 		})
 	}
 }
@@ -961,12 +1019,10 @@ func TestKnownWAVPaths_Failures(t *testing.T) {
 
 	t.Run("rows", func(t *testing.T) {
 		s := openTestStore(t)
-		addBoom(t, s)
-		mustExec(t, s, `DROP TABLE legs`)
-		mustExec(t, s, `CREATE VIEW legs AS SELECT abs(x) AS wav_path FROM boom`)
+		failRowsWhen(t, s, "SELECT wav_path FROM legs")
 
 		_, err := s.KnownWAVPaths(ctx)
-		wantErr(t, err, "known wav paths rows")
+		wantRowsErr(t, err, "known wav paths rows")
 	})
 }
 
@@ -1101,12 +1157,10 @@ func TestExpiredCallIDs_Failures(t *testing.T) {
 	t.Run("rows", func(t *testing.T) {
 		s := openTestStore(t)
 		recordSimpleLeg(t, s, "dlg-old", old)
-		addBoom(t, s)
-		mustExec(t, s, `ALTER TABLE calls RENAME TO calls_real`)
-		mustExec(t, s, `CREATE VIEW calls AS SELECT abs(boom.x) AS id, started_at FROM calls_real, boom`)
+		failRowsWhen(t, s, "SELECT id FROM calls WHERE started_at")
 
 		_, err := s.expiredCallIDs(ctx, time.Now())
-		wantErr(t, err, "retention rows")
+		wantRowsErr(t, err, "retention rows")
 	})
 }
 
